@@ -2,11 +2,8 @@ import sqlite3
 import json
 
 from datetime import datetime
-from pathlib import Path
 
-
-BASE_DIR = Path(__file__).resolve().parent
-DB_FILE = BASE_DIR / "private_ai.db"
+from app.config import DB_FILE
 
 
 # =========================================================
@@ -14,8 +11,17 @@ DB_FILE = BASE_DIR / "private_ai.db"
 # =========================================================
 
 def get_connection():
+    DB_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA foreign_keys = ON")
+
+    conn.execute(
+        "PRAGMA foreign_keys = ON"
+    )
+
     return conn
 
 

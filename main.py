@@ -39,7 +39,7 @@ from app.router import (
     route_model,
 )
 
-from database import (
+from app.database import (
     initialize_database,
 
     create_user,

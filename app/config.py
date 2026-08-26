@@ -11,6 +11,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 UPLOAD_DIR = PROJECT_ROOT / "uploads"
 GENERATED_DIR = PROJECT_ROOT / "generated"
 
+DB_FILE = DATA_DIR / "private_ai.db"
+
 
 # =========================================================
 # TEXT MODELS
