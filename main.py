@@ -3,20 +3,15 @@ from app.config import (
     DEFAULT_MODEL,
     DEEP_MODEL,
     SHOW_ROUTER_ACTIVITY,
-    MEMORY_RETRIEVAL_LIMIT,
 )
 
 from app.ollama_client import (
-    chat_stream,
     get_embedding,
-    OllamaError,
-    OllamaConnectionError,
 )
 
 from app.router import (
     get_model_mode,
     set_model_mode,
-    route_model,
 )
 
 from app.database import (
@@ -30,7 +25,6 @@ from app.database import (
     list_conversations,
     conversation_belongs_to_user,
 
-    save_message,
     load_messages,
 
     get_conversation_summary,
@@ -42,24 +36,25 @@ from app.database import (
     archive_memory,
     restore_memory,
     delete_memory,
-    mark_memories_accessed,
 )
 
 from app.memory import (
     ensure_memory_embeddings,
     rebuild_memory_embeddings,
     retrieve_relevant_memories,
-    process_automatic_memory,
 )
 
 from app.sessions import (
     maybe_update_session_summary,
-    build_session_context,
+)
+
+from app.services.chat import (
+    stream_chat,
 )
 
 
 # =========================================================
-# MAIN CHAT
+# TERMINAL CHAT ADAPTER
 # =========================================================
 
 def ask_ai(
@@ -67,161 +62,107 @@ def ask_ai(
     conversation_id,
     message,
 ):
-    save_message(
-        conversation_id,
+    """
+    Terminal adapter for the shared ChatService.
+
+    The backend itself lives in:
+
+        app/services/chat.py
+
+    Future Flask routes will consume the exact same
+    stream_chat() function.
+    """
+
+    response_started = False
+
+    for event in stream_chat(
         user_id,
-        "user",
+        conversation_id,
         message,
-    )
-
-    maybe_update_session_summary(
-        user_id,
-        conversation_id,
-    )
-
-    messages = build_session_context(
-        user_id,
-        conversation_id,
-    )
-
-    relevant_memories = (
-        retrieve_relevant_memories(
-            user_id,
-            message,
-            limit=MEMORY_RETRIEVAL_LIMIT,
-        )
-    )
-
-    if relevant_memories:
-        mark_memories_accessed(
-            user_id,
-            [
-                memory["id"]
-                for memory
-                in relevant_memories
-            ],
+    ):
+        event_type = event.get(
+            "type"
         )
 
-        memory_text = "\n".join(
-            (
-                f"- "
-                f"[{memory['category']} | "
-                f"importance "
-                f"{memory['importance']} | "
-                f"confidence "
-                f"{memory['confidence']:.2f}] "
-                f"{memory['content']}"
-            )
-            for memory
-            in relevant_memories
-        )
+        # -------------------------------------------------
+        # ROUTING
+        # -------------------------------------------------
 
-        messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": (
-                    "RELEVANT LONG-TERM MEMORY:\n"
-                    f"{memory_text}\n\n"
-                    "Use these memories naturally "
-                    "when helpful. "
-                    "Ignore irrelevant memories. "
-                    "Recent explicit user statements "
-                    "take priority over older memory."
-                ),
-            },
-        )
+        if event_type == "route":
 
-    messages.insert(
-        0,
-        {
-            "role": "system",
-            "content": (
-                "You are one consistent private personal "
-                "AI assistant. "
-                "Respond naturally, clearly, and helpfully. "
-                "Do not change personality based on the "
-                "underlying model being used. "
-                "Use relevant session context and long-term "
-                "memory when available. "
-                "Recent user statements take priority over "
-                "older summaries or memories."
-            ),
-        },
-    )
-
-    selected_mode, selected_model = (
-        route_model(message)
-    )
-
-    if SHOW_ROUTER_ACTIVITY:
-        print(
-            f"Router: "
-            f"{selected_mode} "
-            f"→ {selected_model}"
-        )
-
-    print(
-        "AI: ",
-        end="",
-        flush=True,
-    )
-
-    full_response = ""
-
-    try:
-        for data in chat_stream(
-            model=selected_model,
-            messages=messages,
-            timeout=600,
-        ):
-            if "message" not in data:
-                continue
-
-            chunk = (
-                data["message"]
-                .get(
-                    "content",
-                    "",
+            if SHOW_ROUTER_ACTIVITY:
+                print(
+                    f"Router: "
+                    f"{event['mode']} "
+                    f"→ {event['model']}"
                 )
-            )
-
-            if not chunk:
-                continue
-
-            full_response += chunk
 
             print(
-                chunk,
+                "AI: ",
                 end="",
                 flush=True,
             )
 
-        print("\n")
+            response_started = True
 
-        save_message(
-            conversation_id,
-            user_id,
-            "assistant",
-            full_response,
-        )
+        # -------------------------------------------------
+        # THINKING
+        #
+        # Intentionally hidden in terminal for now.
+        # The backend already exposes it for the future
+        # web interface.
+        # -------------------------------------------------
 
-        process_automatic_memory(
-            user_id,
-            message,
-        )
+        elif event_type == "thinking":
+            continue
 
-    except OllamaConnectionError:
-        print(
-            "\n\nError: Could not connect "
-            "to Ollama.\n"
-        )
+        # -------------------------------------------------
+        # RESPONSE CONTENT
+        # -------------------------------------------------
 
-    except OllamaError as error:
-        print(
-            f"\n\nOllama error: "
-            f"{error}\n"
-        )
+        elif event_type == "content":
+
+            if not response_started:
+                print(
+                    "AI: ",
+                    end="",
+                    flush=True,
+                )
+
+                response_started = True
+
+            print(
+                event.get(
+                    "content",
+                    "",
+                ),
+                end="",
+                flush=True,
+            )
+
+        # -------------------------------------------------
+        # VISIBLE RESPONSE COMPLETE
+        # -------------------------------------------------
+
+        elif event_type == "response_complete":
+
+            print("\n")
+
+        # -------------------------------------------------
+        # ERROR
+        # -------------------------------------------------
+
+        elif event_type == "error":
+
+            message_text = event.get(
+                "message",
+                "Unknown chat error.",
+            )
+
+            print(
+                f"\n\nError: "
+                f"{message_text}\n"
+            )
 
 
 # =========================================================
@@ -245,13 +186,18 @@ def show_users():
     print()
 
 
-def show_current_user(user_id):
-    user = get_user(user_id)
+def show_current_user(
+    user_id,
+):
+    user = get_user(
+        user_id
+    )
 
     if not user:
         print(
             "\nCurrent user not found.\n"
         )
+
         return
 
     print(
@@ -281,6 +227,7 @@ def show_current_user(user_id):
 # =========================================================
 
 def show_model_mode():
+
     print(
         f"\nCurrent model mode: "
         f"{get_model_mode()}"
@@ -305,18 +252,25 @@ def show_model_mode():
 # SESSION DISPLAY
 # =========================================================
 
-def show_sessions(user_id):
+def show_sessions(
+    user_id,
+):
     conversations = (
-        list_conversations(user_id)
+        list_conversations(
+            user_id
+        )
     )
 
     if not conversations:
         print(
             "\nNo previous chats.\n"
         )
+
         return
 
-    print("\nRecent chats:")
+    print(
+        "\nRecent chats:"
+    )
 
     for conversation in conversations:
         print(
@@ -332,16 +286,21 @@ def show_session_summary(
     user_id,
     conversation_id,
 ):
-    info = get_conversation_summary(
-        conversation_id,
-        user_id,
+    info = (
+        get_conversation_summary(
+            conversation_id,
+            user_id,
+        )
     )
 
-    if not info["summary"]:
+    if not info[
+        "summary"
+    ]:
         print(
             "\nThis session has not "
             "needed summarization yet.\n"
         )
+
         return
 
     print(
@@ -349,7 +308,9 @@ def show_session_summary(
     )
 
     print(
-        info["summary"]
+        info[
+            "summary"
+        ]
     )
 
     print(
@@ -383,12 +344,18 @@ def show_memories(
         print(
             "\nNo memories found.\n"
         )
+
         return
 
     if include_archived:
-        print("\nAll memories:")
+        print(
+            "\nAll memories:"
+        )
+
     else:
-        print("\nActive memories:")
+        print(
+            "\nActive memories:"
+        )
 
     for memory in memories:
         print(
@@ -430,6 +397,7 @@ def show_memory_details(
         print(
             "\nMemory not found.\n"
         )
+
         return
 
     print(
@@ -437,15 +405,18 @@ def show_memory_details(
     )
 
     print(
-        f"Content: {memory[1]}"
+        f"Content: "
+        f"{memory[1]}"
     )
 
     print(
-        f"Category: {memory[2]}"
+        f"Category: "
+        f"{memory[2]}"
     )
 
     print(
-        f"Importance: {memory[3]}"
+        f"Importance: "
+        f"{memory[3]}"
     )
 
     print(
@@ -454,19 +425,23 @@ def show_memory_details(
     )
 
     print(
-        f"Source: {memory[5]}"
+        f"Source: "
+        f"{memory[5]}"
     )
 
     print(
-        f"Status: {memory[6]}"
+        f"Status: "
+        f"{memory[6]}"
     )
 
     print(
-        f"Created: {memory[7]}"
+        f"Created: "
+        f"{memory[7]}"
     )
 
     print(
-        f"Updated: {memory[8]}"
+        f"Updated: "
+        f"{memory[8]}"
     )
 
     print(
@@ -489,16 +464,19 @@ def show_relevant_memories(
     user_id,
     query,
 ):
-    results = retrieve_relevant_memories(
-        user_id,
-        query,
-        limit=10,
+    results = (
+        retrieve_relevant_memories(
+            user_id,
+            query,
+            limit=10,
+        )
     )
 
     if not results:
         print(
             "\nNo memories found.\n"
         )
+
         return
 
     print(
@@ -656,6 +634,7 @@ Session summarization: ON
 Memory lifecycle: ON
 Multi-user foundation: ON
 Multi-model routing: ON
+Shared chat service: ON
 
 Authentication: NOT YET ENABLED
 """)
@@ -666,6 +645,7 @@ Authentication: NOT YET ENABLED
 # =========================================================
 
 while True:
+
     try:
         user_input = input(
             "You: "
@@ -675,12 +655,15 @@ while True:
         print(
             "\n\nPrivate AI stopped.\n"
         )
+
         break
 
     if not user_input:
         continue
 
-    command = user_input.lower()
+    command = (
+        user_input.lower()
+    )
 
 
     # =====================================================
@@ -695,6 +678,7 @@ while True:
         print(
             "\nPrivate AI stopped.\n"
         )
+
         break
 
 
@@ -704,6 +688,7 @@ while True:
 
     if command == "/model":
         show_model_mode()
+
         continue
 
 
@@ -729,6 +714,7 @@ while True:
                 "/model default\n"
                 "/model deep\n"
             )
+
             continue
 
         print(
@@ -747,6 +733,7 @@ while True:
         show_current_user(
             current_user_id
         )
+
         continue
 
 
@@ -756,6 +743,7 @@ while True:
 
     if command == "/users":
         show_users()
+
         continue
 
 
@@ -766,8 +754,10 @@ while True:
     if command.startswith(
         "/user add"
     ):
-        parts = user_input.split(
-            maxsplit=3
+        parts = (
+            user_input.split(
+                maxsplit=3
+            )
         )
 
         if len(parts) < 3:
@@ -775,12 +765,14 @@ while True:
                 "\nUse:\n"
                 "/user add USERNAME DISPLAY_NAME\n"
             )
+
             continue
 
         username = parts[2]
 
         if len(parts) == 4:
             display_name = parts[3]
+
         else:
             display_name = username
 
@@ -795,6 +787,7 @@ while True:
                 f"#{new_user_id}: "
                 f"{display_name}\n"
             )
+
         else:
             print(
                 "\nCould not create user. "
@@ -811,23 +804,28 @@ while True:
     if command.startswith(
         "/switch"
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /switch 2\n"
             )
+
             continue
 
         try:
             requested_user_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nUser ID must be "
                 "a number.\n"
             )
+
             continue
 
         requested_user = get_user(
@@ -838,12 +836,17 @@ while True:
             print(
                 "\nUser not found.\n"
             )
+
             continue
 
-        if requested_user[4] != "active":
+        if (
+            requested_user[4]
+            != "active"
+        ):
             print(
                 "\nUser is not active.\n"
             )
+
             continue
 
         current_user_id = (
@@ -900,6 +903,7 @@ while True:
         show_sessions(
             current_user_id
         )
+
         continue
 
 
@@ -912,6 +916,7 @@ while True:
             current_user_id,
             conversation_id,
         )
+
         continue
 
 
@@ -922,23 +927,28 @@ while True:
     if command.startswith(
         "/resume"
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /resume 3\n"
             )
+
             continue
 
         try:
             requested_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nSession ID must "
                 "be a number.\n"
             )
+
             continue
 
         if not conversation_belongs_to_user(
@@ -949,6 +959,7 @@ while True:
                 "\nChat not found for "
                 "current user.\n"
             )
+
             continue
 
         messages = load_messages(
@@ -996,6 +1007,7 @@ while True:
                 "\nUse: /remember "
                 "something important\n"
             )
+
             continue
 
         embedding = get_embedding(
@@ -1030,6 +1042,7 @@ while True:
             current_user_id,
             include_archived=False,
         )
+
         continue
 
 
@@ -1038,6 +1051,7 @@ while True:
             current_user_id,
             include_archived=True,
         )
+
         continue
 
 
@@ -1048,23 +1062,28 @@ while True:
     if command.startswith(
         "/memory "
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /memory 3\n"
             )
+
             continue
 
         try:
             memory_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nMemory ID must "
                 "be a number.\n"
             )
+
             continue
 
         show_memory_details(
@@ -1082,8 +1101,10 @@ while True:
     if command.startswith(
         "/edit"
     ):
-        parts = user_input.split(
-            maxsplit=2
+        parts = (
+            user_input.split(
+                maxsplit=2
+            )
         )
 
         if len(parts) != 3:
@@ -1091,20 +1112,25 @@ while True:
                 "\nUse: "
                 "/edit 2 New memory text\n"
             )
+
             continue
 
         try:
             memory_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nMemory ID must "
                 "be a number.\n"
             )
+
             continue
 
-        new_text = parts[2].strip()
+        new_text = (
+            parts[2].strip()
+        )
 
         new_embedding = get_embedding(
             new_text
@@ -1122,6 +1148,7 @@ while True:
                 f"\nUpdated memory "
                 f"{memory_id}.\n"
             )
+
         else:
             print(
                 "\nMemory not found "
@@ -1138,23 +1165,28 @@ while True:
     if command.startswith(
         "/archive"
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /archive 3\n"
             )
+
             continue
 
         try:
             memory_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nMemory ID must "
                 "be a number.\n"
             )
+
             continue
 
         if archive_memory(
@@ -1165,6 +1197,7 @@ while True:
                 f"\nArchived memory "
                 f"{memory_id}.\n"
             )
+
         else:
             print(
                 "\nMemory not found.\n"
@@ -1180,23 +1213,28 @@ while True:
     if command.startswith(
         "/restore"
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /restore 3\n"
             )
+
             continue
 
         try:
             memory_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nMemory ID must "
                 "be a number.\n"
             )
+
             continue
 
         if restore_memory(
@@ -1207,6 +1245,7 @@ while True:
                 f"\nRestored memory "
                 f"{memory_id}.\n"
             )
+
         else:
             print(
                 "\nMemory not found.\n"
@@ -1222,23 +1261,28 @@ while True:
     if command.startswith(
         "/forget"
     ):
-        parts = user_input.split()
+        parts = (
+            user_input.split()
+        )
 
         if len(parts) != 2:
             print(
                 "\nUse: /forget 2\n"
             )
+
             continue
 
         try:
             memory_id = int(
                 parts[1]
             )
+
         except ValueError:
             print(
                 "\nMemory ID must "
                 "be a number.\n"
             )
+
             continue
 
         if delete_memory(
@@ -1249,6 +1293,7 @@ while True:
                 f"\nPermanently deleted "
                 f"memory {memory_id}.\n"
             )
+
         else:
             print(
                 "\nMemory not found.\n"
@@ -1273,6 +1318,7 @@ while True:
                 "\nUse: /relevant "
                 "camera equipment\n"
             )
+
             continue
 
         show_relevant_memories(
@@ -1289,6 +1335,7 @@ while True:
 
     if command == "/reindex":
         rebuild_memory_embeddings()
+
         continue
 
 
