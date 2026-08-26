@@ -1,0 +1,33 @@
+# =========================================================
+# PRIVATE AI - LOCAL DATA
+# =========================================================
+
+private_ai.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Future runtime data
+data/
+uploads/
+generated/
+models/
+instance/
+
+# Secrets / API keys
+.env
+.env.*
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
