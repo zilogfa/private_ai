@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Login · Private AI{% endblock %}
+{% block body_class %}auth-body{% endblock %}
+
+{% block content %}
+<main class="auth-page">
+    <section class="auth-card">
+        <div class="brand-mark">P</div>
+
+        <h1>Private AI</h1>
+
+        <p class="muted">
+            Sign in to your local assistant.
+        </p>
+
+        <form method="post" class="form-stack">
+            <input
+                type="hidden"
+                name="_csrf_token"
+                value="{{ csrf_token() }}"
+            >
+
+            <input
+                type="hidden"
+                name="next"
+                value="{{ next_url }}"
+            >
+
+            <label>
+                Username
+                <input
+                    type="text"
+                    name="username"
+                    value="local_owner"
+                    autocomplete="username"
+                    required
+                >
+            </label>
+
+            <label>
+                Password
+                <input
+                    type="password"
+                    name="password"
+                    autocomplete="current-password"
+                    required
+                >
+            </label>
+
+            <button
+                type="submit"
+                class="primary-button"
+            >
+                Sign in
+            </button>
+        </form>
+    </section>
+</main>
+{% endblock %}

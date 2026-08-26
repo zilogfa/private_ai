@@ -15,7 +15,11 @@ from app.ollama_client import (
 
 
 # =========================================================
-# ROUTER STATE
+# TERMINAL ROUTER STATE
+#
+# This global state is retained only for the terminal UI.
+# Web requests pass a model mode explicitly so different
+# users do not affect one another.
 # =========================================================
 
 _current_model_mode = DEFAULT_MODEL_MODE
@@ -25,17 +29,34 @@ def get_model_mode():
     return _current_model_mode
 
 
+def normalize_model_mode(
+    mode,
+    fallback=DEFAULT_MODEL_MODE,
+):
+    normalized = (
+        str(mode or "")
+        .lower()
+        .strip()
+    )
+
+    if normalized in VALID_MODEL_MODES:
+        return normalized
+
+    return fallback
+
+
 def set_model_mode(mode):
     global _current_model_mode
 
-    mode = str(
-        mode
-    ).lower().strip()
+    normalized = normalize_model_mode(
+        mode,
+        fallback="",
+    )
 
-    if mode not in VALID_MODEL_MODES:
+    if normalized not in VALID_MODEL_MODES:
         return False
 
-    _current_model_mode = mode
+    _current_model_mode = normalized
 
     return True
 
@@ -45,7 +66,6 @@ def set_model_mode(mode):
 # =========================================================
 
 def model_name_from_mode(mode):
-
     if mode == "fast":
         return FAST_MODEL
 
@@ -60,7 +80,6 @@ def model_name_from_mode(mode):
 # =========================================================
 
 def heuristic_route(message):
-
     text = message.lower()
 
     deep_keywords = [
@@ -172,16 +191,32 @@ def obvious_route(message):
 # AI ROUTER
 # =========================================================
 
-def route_model(user_message):
+def route_model(
+    user_message,
+    mode=None,
+):
+    """
+    Route one request.
 
-    current_mode = get_model_mode()
+    mode=None:
+        use terminal global mode
+
+    mode="auto|fast|default|deep":
+        request-scoped mode, safe for web multi-user use
+    """
+
+    if mode is None:
+        current_mode = get_model_mode()
+    else:
+        current_mode = normalize_model_mode(
+            mode
+        )
 
     # -----------------------------------------------------
     # Manual mode
     # -----------------------------------------------------
 
     if current_mode != "auto":
-
         return (
             current_mode,
             model_name_from_mode(
@@ -198,7 +233,6 @@ def route_model(user_message):
     )
 
     if obvious is not None:
-
         return (
             obvious,
             model_name_from_mode(
@@ -296,7 +330,6 @@ Do not explain.
     ]
 
     try:
-
         data = chat_once(
             model=ROUTER_MODEL,
             messages=messages,
@@ -340,7 +373,6 @@ Do not explain.
             "default",
             "deep",
         ):
-
             selected_mode = (
                 heuristic_route(
                     user_message
@@ -348,7 +380,6 @@ Do not explain.
             )
 
     except Exception:
-
         selected_mode = (
             heuristic_route(
                 user_message

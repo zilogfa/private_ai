@@ -1,3 +1,5 @@
+import os
+
 from pathlib import Path
 
 
@@ -12,6 +14,10 @@ UPLOAD_DIR = PROJECT_ROOT / "uploads"
 GENERATED_DIR = PROJECT_ROOT / "generated"
 
 DB_FILE = DATA_DIR / "private_ai.db"
+
+FLASK_SECRET_KEY_FILE = (
+    DATA_DIR / ".flask_secret_key"
+)
 
 
 # =========================================================
@@ -96,3 +102,40 @@ SUMMARY_BATCH_LIMIT = 24
 MAX_SUMMARY_PASSES = 5
 
 SHOW_SUMMARY_ACTIVITY = True
+
+
+# =========================================================
+# WEB / FLASK
+# =========================================================
+
+WEB_HOST = os.environ.get(
+    "PRIVATE_AI_HOST",
+    "127.0.0.1",
+)
+
+WEB_PORT = int(
+    os.environ.get(
+        "PRIVATE_AI_PORT",
+        "5000",
+    )
+)
+
+WEB_DEBUG = (
+    os.environ.get(
+        "PRIVATE_AI_DEBUG",
+        "0",
+    )
+    == "1"
+)
+
+SESSION_COOKIE_NAME = (
+    "private_ai_session"
+)
+
+SESSION_LIFETIME_DAYS = 30
+
+MAX_UPLOAD_BYTES = (
+    25
+    * 1024
+    * 1024
+)

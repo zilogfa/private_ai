@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Set up Private AI{% endblock %}
+{% block body_class %}auth-body{% endblock %}
+
+{% block content %}
+<main class="auth-page">
+    <section class="auth-card">
+        <div class="brand-mark">P</div>
+
+        <h1>Set up Private AI</h1>
+
+        <p class="muted">
+            Create the password for the local owner account.
+            This password is stored only as a secure hash.
+        </p>
+
+        <form method="post" class="form-stack">
+            <input
+                type="hidden"
+                name="_csrf_token"
+                value="{{ csrf_token() }}"
+            >
+
+            <label>
+                Password
+                <input
+                    type="password"
+                    name="password"
+                    minlength="8"
+                    autocomplete="new-password"
+                    required
+                >
+            </label>
+
+            <label>
+                Confirm password
+                <input
+                    type="password"
+                    name="confirm_password"
+                    minlength="8"
+                    autocomplete="new-password"
+                    required
+                >
+            </label>
+
+            <button
+                type="submit"
+                class="primary-button"
+            >
+                Create owner password
+            </button>
+        </form>
+    </section>
+</main>
+{% endblock %}

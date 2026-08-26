@@ -153,58 +153,33 @@ def stream_chat(
     user_id,
     conversation_id,
     user_message,
+    model_mode=None,
+    include_thinking=True,
 ):
     """
-    Main reusable AI chat pipeline.
+    Shared UI-independent chat pipeline.
 
-    This function is UI-independent.
+    Web requests should pass model_mode explicitly.
+    Terminal requests may leave it as None.
 
-    It can be consumed by:
-    - terminal
-    - Flask
-    - future desktop/mobile clients
-    - device APIs
+    Standard event families:
+        status
+        route
+        thinking
+        content
+        response_complete
+        done
+        error
 
-    Events yielded:
-
-    route:
-        {
-            "type": "route",
-            "mode": "fast",
-            "model": "qwen3:4b"
-        }
-
-    thinking:
-        {
-            "type": "thinking",
-            "content": "..."
-        }
-
-    content:
-        {
-            "type": "content",
-            "content": "..."
-        }
-
-    response_complete:
-        {
-            "type": "response_complete",
-            ...
-        }
-
-    done:
-        {
-            "type": "done",
-            ...
-        }
-
-    error:
-        {
-            "type": "error",
-            "kind": "...",
-            "message": "..."
-        }
+    Future capabilities such as vision, search, speech,
+    and image generation can reuse the same event pattern.
     """
+
+    yield {
+        "type": "status",
+        "status": "preparing",
+        "label": "Preparing...",
+    }
 
     # -----------------------------------------------------
     # Save user message
@@ -240,9 +215,16 @@ def stream_chat(
     # Model routing
     # -----------------------------------------------------
 
+    yield {
+        "type": "status",
+        "status": "routing",
+        "label": "Routing...",
+    }
+
     selected_mode, selected_model = (
         route_model(
-            user_message
+            user_message,
+            mode=model_mode,
         )
     )
 
@@ -252,12 +234,21 @@ def stream_chat(
         "model": selected_model,
     }
 
+    yield {
+        "type": "status",
+        "status": "generating",
+        "label": "Generating...",
+    }
+
     # -----------------------------------------------------
     # Generate response
     # -----------------------------------------------------
 
     full_response = ""
     full_thinking = ""
+
+    thinking_started = False
+    content_started = False
 
     try:
         for data in chat_stream(
@@ -282,14 +273,24 @@ def stream_chat(
             )
 
             if thinking_chunk:
-                full_thinking += (
-                    thinking_chunk
-                )
+                if include_thinking:
+                    if not thinking_started:
+                        yield {
+                            "type": "status",
+                            "status": "thinking",
+                            "label": "Thinking...",
+                        }
 
-                yield {
-                    "type": "thinking",
-                    "content": thinking_chunk,
-                }
+                        thinking_started = True
+
+                    full_thinking += (
+                        thinking_chunk
+                    )
+
+                    yield {
+                        "type": "thinking",
+                        "content": thinking_chunk,
+                    }
 
             # ---------------------------------------------
             # Final answer stream
@@ -303,6 +304,15 @@ def stream_chat(
             )
 
             if content_chunk:
+                if not content_started:
+                    yield {
+                        "type": "status",
+                        "status": "responding",
+                        "label": "Responding...",
+                    }
+
+                    content_started = True
+
                 full_response += (
                     content_chunk
                 )
@@ -323,13 +333,6 @@ def stream_chat(
             full_response,
         )
 
-        # -------------------------------------------------
-        # Signal that visible response is complete
-        #
-        # This happens before memory processing so a UI
-        # does not need to wait for memory maintenance.
-        # -------------------------------------------------
-
         yield {
             "type": "response_complete",
             "mode": selected_mode,
@@ -340,6 +343,12 @@ def stream_chat(
         # -------------------------------------------------
         # Automatic long-term memory processing
         # -------------------------------------------------
+
+        yield {
+            "type": "status",
+            "status": "memory",
+            "label": "Updating memory...",
+        }
 
         process_automatic_memory(
             user_id,
@@ -355,11 +364,14 @@ def stream_chat(
             "mode": selected_mode,
             "model": selected_model,
             "response": full_response,
-            "thinking": full_thinking,
+            "thinking": (
+                full_thinking
+                if include_thinking
+                else ""
+            ),
         }
 
     except OllamaConnectionError:
-
         yield {
             "type": "error",
             "kind": "connection",
@@ -369,7 +381,6 @@ def stream_chat(
         }
 
     except OllamaError as error:
-
         yield {
             "type": "error",
             "kind": "ollama",

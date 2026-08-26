@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}Profile · Private AI{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+
+{% block content %}
+<main class="settings-page">
+    <div class="page-header-row">
+        <div>
+            <a
+                href="{{ url_for('web.chat') }}"
+                class="back-link"
+            >
+                ← Back to chat
+            </a>
+
+            <h1>Profile & settings</h1>
+        </div>
+
+        {% if can_admin %}
+        <a
+            href="{{ url_for('web.admin') }}"
+            class="secondary-button"
+        >
+            Admin panel
+        </a>
+        {% endif %}
+    </div>
+
+    <section class="settings-card">
+        <form method="post" class="form-stack">
+            <input
+                type="hidden"
+                name="_csrf_token"
+                value="{{ csrf_token() }}"
+            >
+
+            <label>
+                Display name
+                <input
+                    type="text"
+                    name="display_name"
+                    value="{{ user[2] }}"
+                    required
+                >
+            </label>
+
+            <label>
+                Default model mode
+                <select name="default_model_mode">
+                    {% for mode in ["auto", "fast", "default", "deep"] %}
+                    <option
+                        value="{{ mode }}"
+                        {% if settings.get('default_model_mode', 'auto') == mode %}selected{% endif %}
+                    >
+                        {{ mode|capitalize }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            <label>
+                Theme
+                <select name="theme">
+                    {% for theme_name in ["system", "light", "dark"] %}
+                    <option
+                        value="{{ theme_name }}"
+                        {% if settings.get('theme', 'system') == theme_name %}selected{% endif %}
+                    >
+                        {{ theme_name|capitalize }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </label>
+
+            <label class="check-row">
+                <input
+                    type="checkbox"
+                    name="show_thinking"
+                    {% if settings.get('show_thinking', True) %}checked{% endif %}
+                >
+                <span>
+                    Show collapsible thinking when available
+                </span>
+            </label>
+
+            <label class="check-row">
+                <input
+                    type="checkbox"
+                    name="tts_enabled"
+                    {% if settings.get('tts_enabled', False) %}checked{% endif %}
+                >
+                <span>
+                    Text-to-speech preference
+                    <small>
+                        (foundation only for now)
+                    </small>
+                </span>
+            </label>
+
+            <button
+                type="submit"
+                class="primary-button"
+            >
+                Save settings
+            </button>
+        </form>
+    </section>
+
+    <section class="settings-card">
+        <h2>Access</h2>
+
+        <p>
+            Username:
+            <strong>{{ user[1] }}</strong>
+        </p>
+
+        <p>
+            Roles:
+            {% for role in roles %}
+                <span class="role-pill">
+                    {{ role[1] }}
+                </span>
+            {% endfor %}
+        </p>
+    </section>
+</main>
+{% endblock %}

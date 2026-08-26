@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+
+{% block title %}Private AI{% endblock %}
+{% block body_class %}chat-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+
+{% block content %}
+<div
+    id="chatApp"
+    class="chat-shell"
+    data-default-model="{{ settings.get('default_model_mode', 'auto') }}"
+>
+    <div
+        id="sidebarOverlay"
+        class="sidebar-overlay"
+        aria-hidden="true"
+    ></div>
+
+    <aside
+        id="sidebar"
+        class="sidebar"
+        aria-label="Conversation sidebar"
+    >
+        <div class="sidebar-top">
+            <div class="sidebar-brand">
+                <div class="brand-mark small">P</div>
+                <span>Private AI</span>
+            </div>
+
+            <button
+                id="newChatButton"
+                class="new-chat-button"
+                type="button"
+            >
+                <span>＋</span>
+                New chat
+            </button>
+        </div>
+
+        <div class="sidebar-section-title">
+            Chats
+        </div>
+
+        <nav
+            id="conversationList"
+            class="conversation-list"
+            aria-label="Chat history"
+        >
+            <div class="sidebar-loading">
+                Loading...
+            </div>
+        </nav>
+
+        <div class="sidebar-footer">
+            <a
+                href="{{ url_for('web.profile') }}"
+                class="sidebar-link"
+            >
+                <span>⚙</span>
+                Profile & settings
+            </a>
+
+            {% if can_admin %}
+            <a
+                href="{{ url_for('web.admin') }}"
+                class="sidebar-link"
+            >
+                <span>◫</span>
+                Admin control panel
+            </a>
+            {% endif %}
+
+            <form
+                method="post"
+                action="{{ url_for('web.logout') }}"
+            >
+                <input
+                    type="hidden"
+                    name="_csrf_token"
+                    value="{{ csrf_token() }}"
+                >
+
+                <button
+                    class="sidebar-link sidebar-button"
+                    type="submit"
+                >
+                    <span>↪</span>
+                    Sign out
+                </button>
+            </form>
+
+            <div class="sidebar-user">
+                <div class="user-avatar">
+                    {{ user[2][0]|upper }}
+                </div>
+
+                <div>
+                    <strong>{{ user[2] }}</strong>
+                    <small>{{ user[1] }}</small>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="chat-main">
+        <header class="chat-header">
+            <button
+                id="mobileMenuButton"
+                class="icon-button mobile-menu-button"
+                type="button"
+                aria-label="Open sidebar"
+            >
+                ☰
+            </button>
+
+            <div class="chat-title">
+                Private AI
+            </div>
+
+            <label class="model-control">
+                <span class="sr-only">
+                    Model mode
+                </span>
+
+                <select id="modelSelect">
+                    <option value="auto">
+                        Auto
+                    </option>
+                    <option value="fast">
+                        Fast
+                    </option>
+                    <option value="default">
+                        Default
+                    </option>
+                    <option value="deep">
+                        Deep
+                    </option>
+                </select>
+            </label>
+        </header>
+
+        <section
+            id="messages"
+            class="messages"
+            aria-live="polite"
+        >
+            <div
+                id="welcomeState"
+                class="welcome-state"
+            >
+                <div class="brand-mark large">
+                    P
+                </div>
+
+                <h1>
+                    How can I help?
+                </h1>
+
+                <p>
+                    Local chat with memory,
+                    model routing, and private data.
+                </p>
+            </div>
+        </section>
+
+        <footer class="composer-wrap">
+            <div
+                id="attachmentNotice"
+                class="composer-notice"
+                hidden
+            ></div>
+
+            <form
+                id="composerForm"
+                class="composer"
+            >
+                <button
+                    id="attachmentButton"
+                    class="composer-icon-button"
+                    type="button"
+                    aria-label="Add attachment"
+                    title="Image and document upload foundation"
+                >
+                    ＋
+                </button>
+
+                <textarea
+                    id="messageInput"
+                    rows="1"
+                    placeholder="Message Private AI"
+                    autocomplete="off"
+                ></textarea>
+
+                <button
+                    id="microphoneButton"
+                    class="composer-icon-button"
+                    type="button"
+                    aria-label="Voice input"
+                    title="Speech support coming later"
+                >
+                    ◉
+                </button>
+
+                <button
+                    id="stopButton"
+                    class="send-button stop-button"
+                    type="button"
+                    aria-label="Stop generation"
+                    hidden
+                >
+                    ■
+                </button>
+
+                <button
+                    id="sendButton"
+                    class="send-button"
+                    type="submit"
+                    aria-label="Send message"
+                >
+                    ↑
+                </button>
+            </form>
+
+            <div class="composer-caption">
+                Private AI runs locally. Verify important information.
+            </div>
+        </footer>
+    </main>
+</div>
+
+<template id="imageGenerationTemplate">
+    <article class="message assistant-message">
+        <div class="message-inner">
+            <div class="image-generation-card">
+                <div class="image-shimmer"></div>
+                <div class="image-generation-label">
+                    Generating image...
+                </div>
+            </div>
+        </div>
+    </article>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/chat.js') }}"
+    defer
+></script>
+{% endblock %}
