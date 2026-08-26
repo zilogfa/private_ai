@@ -1,6 +1,43 @@
-import requests
 import json
 import math
+
+from app.config import (
+    FAST_MODEL,
+    DEFAULT_MODEL,
+    DEEP_MODEL,
+
+    MEMORY_MODEL,
+    SESSION_SUMMARY_MODEL,
+
+    SHOW_ROUTER_ACTIVITY,
+
+    AUTO_MEMORY,
+    SHOW_MEMORY_ACTIVITY,
+    MEMORY_RETRIEVAL_LIMIT,
+    MEMORY_MANAGER_LIMIT,
+    AUTO_LIFECYCLE_MIN_CONFIDENCE,
+
+    SUMMARY_TRIGGER_MESSAGES,
+    RECENT_MESSAGE_LIMIT,
+    SUMMARY_BATCH_LIMIT,
+    MAX_SUMMARY_PASSES,
+    SHOW_SUMMARY_ACTIVITY,
+)
+
+from app.ollama_client import (
+    chat_once,
+    chat_stream,
+    get_embedding,
+
+    OllamaError,
+    OllamaConnectionError,
+)
+
+from app.router import (
+    get_model_mode,
+    set_model_mode,
+    route_model,
+)
 
 from database import (
     initialize_database,
@@ -31,89 +68,8 @@ from database import (
 
     load_memories_without_embeddings,
     set_memory_embedding,
-    clear_memory_embeddings
+    clear_memory_embeddings,
 )
-
-
-# =========================================================
-# MODELS
-# =========================================================
-
-FAST_MODEL = "qwen3:4b"
-
-DEFAULT_MODEL = "qwen3:8b"
-
-DEEP_MODEL = "deepseek-r1:14b"
-
-ROUTER_MODEL = FAST_MODEL
-
-MEMORY_MODEL = FAST_MODEL
-
-SESSION_SUMMARY_MODEL = DEFAULT_MODEL
-
-EMBEDDING_MODEL = "nomic-embed-text"
-
-
-# =========================================================
-# MODEL ROUTING
-# =========================================================
-
-# Options:
-# fast
-# default
-# deep
-# auto
-
-MODEL_MODE = "auto"
-
-SHOW_ROUTER_ACTIVITY = True
-
-
-# =========================================================
-# OLLAMA
-# =========================================================
-
-OLLAMA_CHAT_URL = (
-    "http://localhost:11434/api/chat"
-)
-
-OLLAMA_EMBED_URL = (
-    "http://localhost:11434/api/embed"
-)
-
-OLLAMA_OLD_EMBED_URL = (
-    "http://localhost:11434/api/embeddings"
-)
-
-
-# =========================================================
-# MEMORY CONFIG
-# =========================================================
-
-AUTO_MEMORY = True
-
-SHOW_MEMORY_ACTIVITY = True
-
-MEMORY_RETRIEVAL_LIMIT = 8
-
-MEMORY_MANAGER_LIMIT = 15
-
-AUTO_LIFECYCLE_MIN_CONFIDENCE = 0.90
-
-
-# =========================================================
-# SESSION SUMMARY CONFIG
-# =========================================================
-
-SUMMARY_TRIGGER_MESSAGES = 18
-
-RECENT_MESSAGE_LIMIT = 12
-
-SUMMARY_BATCH_LIMIT = 24
-
-MAX_SUMMARY_PASSES = 5
-
-SHOW_SUMMARY_ACTIVITY = True
 
 
 # =========================================================
@@ -127,13 +83,16 @@ def clamp_importance(value):
 
     except (
         ValueError,
-        TypeError
+        TypeError,
     ):
         return 5
 
     return max(
         1,
-        min(10, value)
+        min(
+            10,
+            value,
+        ),
     )
 
 
@@ -144,13 +103,16 @@ def clamp_confidence(value):
 
     except (
         ValueError,
-        TypeError
+        TypeError,
     ):
         return 0.7
 
     return max(
         0.0,
-        min(1.0, value)
+        min(
+            1.0,
+            value,
+        ),
     )
 
 
@@ -169,341 +131,16 @@ def memory_to_dict(memory):
         "last_accessed_at": memory[9],
         "access_count": memory[10],
         "embedding": memory[11],
-        "merged_into_id": memory[12]
+        "merged_into_id": memory[12],
     }
 
 
 # =========================================================
-# MODEL ROUTER
+# EMBEDDING HELPERS
 # =========================================================
-
-def model_name_from_mode(mode):
-
-    if mode == "fast":
-        return FAST_MODEL
-
-    if mode == "deep":
-        return DEEP_MODEL
-
-    return DEFAULT_MODEL
-
-
-def heuristic_route(message):
-
-    text = message.lower()
-
-    deep_keywords = [
-        "debug",
-        "architecture",
-        "algorithm",
-        "leetcode",
-        "optimize",
-        "complex",
-        "reason",
-        "reasoning",
-        "prove",
-        "math",
-        "analyze deeply",
-        "deep analysis",
-        "step by step",
-        "database design",
-        "system design",
-        "security",
-        "performance issue"
-    ]
-
-    fast_keywords = [
-        "short answer",
-        "quick question",
-        "briefly",
-        "simple question",
-        "translate",
-        "rewrite",
-        "grammar",
-        "what does",
-        "define"
-    ]
-
-    if any(
-        keyword in text
-        for keyword in deep_keywords
-    ):
-        return "deep"
-
-    if any(
-        keyword in text
-        for keyword in fast_keywords
-    ):
-        return "fast"
-
-    if len(message) < 80:
-        return "fast"
-
-    return "default"
-
-
-def route_model(
-    user_message
-):
-
-    if MODEL_MODE != "auto":
-
-        return (
-            MODEL_MODE,
-            model_name_from_mode(
-                MODEL_MODE
-            )
-        )
-
-    router_prompt = """
-You are a model router for a private AI assistant.
-
-Choose which model tier should answer the user's message.
-
-You have exactly three choices:
-
-fast
-default
-deep
-
-FAST:
-Use for:
-- simple questions
-- casual conversation
-- definitions
-- straightforward factual explanations
-- short rewriting
-- grammar
-- translation
-- simple commands
-- easy coding questions
-- lightweight summaries
-
-DEFAULT:
-Use for:
-- normal conversation
-- most technical questions
-- normal coding
-- comparisons
-- planning
-- moderate reasoning
-- explanations requiring some nuance
-- most general-purpose requests
-
-DEEP:
-Use only when useful for:
-- difficult debugging
-- complex coding
-- algorithms
-- LeetCode-style reasoning
-- math
-- multi-step logical reasoning
-- architecture decisions
-- difficult planning
-- subtle tradeoffs
-- complex system design
-- difficult technical analysis
-
-Do NOT select deep merely because the message is long.
-
-Prefer the cheapest model that can answer well.
-
-Return ONLY valid JSON:
-
-{
-    "mode": "fast"
-}
-
-or:
-
-{
-    "mode": "default"
-}
-
-or:
-
-{
-    "mode": "deep"
-}
-
-Do not explain.
-"""
-
-    payload = {
-        "model": ROUTER_MODEL,
-
-        "messages": [
-            {
-                "role": "system",
-                "content": router_prompt
-            },
-            {
-                "role": "user",
-                "content": user_message
-            }
-        ],
-
-        "stream": False,
-
-        "format": "json",
-
-        "options": {
-            "temperature": 0
-        }
-    }
-
-    try:
-
-        response = requests.post(
-            OLLAMA_CHAT_URL,
-            json=payload,
-            timeout=120
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        content = (
-            data[
-                "message"
-            ][
-                "content"
-            ].strip()
-        )
-
-        result = json.loads(
-            content
-        )
-
-        selected_mode = (
-            str(
-                result.get(
-                    "mode",
-                    "default"
-                )
-            )
-            .lower()
-            .strip()
-        )
-
-        if selected_mode not in [
-            "fast",
-            "default",
-            "deep"
-        ]:
-
-            selected_mode = (
-                heuristic_route(
-                    user_message
-                )
-            )
-
-    except Exception:
-
-        selected_mode = (
-            heuristic_route(
-                user_message
-            )
-        )
-
-    selected_model = (
-        model_name_from_mode(
-            selected_mode
-        )
-    )
-
-    return (
-        selected_mode,
-        selected_model
-    )
-
-
-# =========================================================
-# EMBEDDINGS
-# =========================================================
-
-def get_embedding(
-    text,
-    show_error=True
-):
-
-    text = text.strip()
-
-    if not text:
-        return None
-
-    try:
-
-        payload = {
-            "model": EMBEDDING_MODEL,
-            "input": text
-        }
-
-        response = requests.post(
-            OLLAMA_EMBED_URL,
-            json=payload,
-            timeout=300
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        embeddings = data.get(
-            "embeddings"
-        )
-
-        if (
-            embeddings
-            and isinstance(
-                embeddings,
-                list
-            )
-        ):
-            return embeddings[0]
-
-    except Exception:
-        pass
-
-    try:
-
-        payload = {
-            "model": EMBEDDING_MODEL,
-            "prompt": text
-        }
-
-        response = requests.post(
-            OLLAMA_OLD_EMBED_URL,
-            json=payload,
-            timeout=300
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        embedding = data.get(
-            "embedding"
-        )
-
-        if embedding:
-            return embedding
-
-    except Exception as error:
-
-        if show_error:
-
-            print(
-                "\nEmbedding error:"
-                f" {error}\n"
-            )
-
-    return None
-
 
 def parse_embedding(
-    stored_embedding
+    stored_embedding,
 ):
 
     if stored_embedding is None:
@@ -511,26 +148,25 @@ def parse_embedding(
 
     if isinstance(
         stored_embedding,
-        list
+        list,
     ):
         return stored_embedding
 
     try:
-
         return json.loads(
             stored_embedding
         )
 
     except (
         json.JSONDecodeError,
-        TypeError
+        TypeError,
     ):
         return None
 
 
 def cosine_similarity(
     vector_a,
-    vector_b
+    vector_b,
 ):
 
     if (
@@ -547,10 +183,9 @@ def cosine_similarity(
 
     dot_product = sum(
         a * b
-
         for a, b in zip(
             vector_a,
-            vector_b
+            vector_b,
         )
     )
 
@@ -615,7 +250,7 @@ def ensure_memory_embeddings():
 
             set_memory_embedding(
                 memory_id,
-                embedding
+                embedding,
             )
 
             completed += 1
@@ -645,7 +280,7 @@ def rebuild_memory_embeddings():
 def retrieve_relevant_memories(
     user_id,
     query,
-    limit=MEMORY_RETRIEVAL_LIMIT
+    limit=MEMORY_RETRIEVAL_LIMIT,
 ):
 
     memories = load_memories(
@@ -658,7 +293,7 @@ def retrieve_relevant_memories(
     query_embedding = (
         get_embedding(
             query,
-            show_error=False
+            show_error=False,
         )
     )
 
@@ -710,7 +345,7 @@ def retrieve_relevant_memories(
         similarity = (
             cosine_similarity(
                 query_embedding,
-                memory_embedding
+                memory_embedding,
             )
         )
 
@@ -750,8 +385,7 @@ def retrieve_relevant_memories(
             item[
                 "ranking_score"
             ],
-
-        reverse=True
+        reverse=True,
     )
 
     return scored[
@@ -765,7 +399,7 @@ def retrieve_relevant_memories(
 
 def create_updated_session_summary(
     existing_summary,
-    message_records
+    message_records,
 ):
 
     if not message_records:
@@ -838,59 +472,45 @@ Do not include reasoning.
         f"{transcript}"
     )
 
-    payload = {
-        "model":
-            SESSION_SUMMARY_MODEL,
-
-        "messages": [
-            {
-                "role":
-                    "system",
-
-                "content":
-                    prompt
-            },
-            {
-                "role":
-                    "user",
-
-                "content":
-                    user_content
-            }
-        ],
-
-        "stream":
-            False,
-
-        "options": {
-            "temperature": 0.2
-        }
-    }
+    messages = [
+        {
+            "role": "system",
+            "content": prompt,
+        },
+        {
+            "role": "user",
+            "content": user_content,
+        },
+    ]
 
     try:
 
-        response = requests.post(
-            OLLAMA_CHAT_URL,
-            json=payload,
-            timeout=300
+        data = chat_once(
+            model=SESSION_SUMMARY_MODEL,
+            messages=messages,
+            options={
+                "temperature": 0.2,
+            },
+            timeout=300,
         )
 
-        response.raise_for_status()
-
-        data = response.json()
-
         summary = (
-            data[
-                "message"
-            ][
-                "content"
-            ].strip()
+            data
+            .get(
+                "message",
+                {},
+            )
+            .get(
+                "content",
+                "",
+            )
+            .strip()
         )
 
         if summary:
             return summary
 
-    except Exception as error:
+    except OllamaError as error:
 
         if SHOW_SUMMARY_ACTIVITY:
 
@@ -904,13 +524,13 @@ Do not include reasoning.
 
 def maybe_update_session_summary(
     user_id,
-    conversation_id
+    conversation_id,
 ):
 
     summary_info = (
         get_conversation_summary(
             conversation_id,
-            user_id
+            user_id,
         )
     )
 
@@ -935,7 +555,7 @@ def maybe_update_session_summary(
                 conversation_id,
                 user_id,
                 after_id=
-                    summarized_through
+                    summarized_through,
             )
         )
 
@@ -969,13 +589,13 @@ def maybe_update_session_summary(
                 "Context: summarizing "
                 "older messages...",
                 end="",
-                flush=True
+                flush=True,
             )
 
         new_summary = (
             create_updated_session_summary(
                 current_summary,
-                batch
+                batch,
             )
         )
 
@@ -986,7 +606,7 @@ def maybe_update_session_summary(
                 + " " * 80
                 + "\r",
                 end="",
-                flush=True
+                flush=True,
             )
 
         if not new_summary:
@@ -1002,7 +622,7 @@ def maybe_update_session_summary(
             conversation_id,
             user_id,
             new_summary,
-            summarized_through
+            summarized_through,
         )
 
         current_summary = (
@@ -1022,13 +642,13 @@ def maybe_update_session_summary(
 
 def build_session_context(
     user_id,
-    conversation_id
+    conversation_id,
 ):
 
     summary_info = (
         get_conversation_summary(
             conversation_id,
-            user_id
+            user_id,
         )
     )
 
@@ -1049,7 +669,7 @@ def build_session_context(
             conversation_id,
             user_id,
             after_id=
-                summarized_through
+                summarized_through,
         )
     )
 
@@ -1058,9 +678,7 @@ def build_session_context(
     if session_summary:
 
         messages.append({
-            "role":
-                "system",
-
+            "role": "system",
             "content":
                 (
                     "SESSION CONTEXT SUMMARY:\n"
@@ -1071,7 +689,7 @@ def build_session_context(
 
                     "Recent raw messages take priority "
                     "if there is a conflict."
-                )
+                ),
         })
 
     for record in raw_records:
@@ -1081,11 +699,10 @@ def build_session_context(
                 record[
                     "role"
                 ],
-
             "content":
                 record[
                     "content"
-                ]
+                ],
         })
 
     return messages
@@ -1097,7 +714,7 @@ def build_session_context(
 
 def analyze_memory(
     user_id,
-    user_message
+    user_message,
 ):
 
     relevant_memories = (
@@ -1105,7 +722,7 @@ def analyze_memory(
             user_id,
             user_message,
             limit=
-                MEMORY_MANAGER_LIMIT
+                MEMORY_MANAGER_LIMIT,
         )
     )
 
@@ -1133,7 +750,7 @@ def analyze_memory(
                 memory["source"],
 
             "access_count":
-                memory["access_count"]
+                memory["access_count"],
         })
 
     prompt = """
@@ -1291,62 +908,52 @@ Do not include Markdown.
             memory_list,
 
         "new_user_message":
-            user_message
+            user_message,
     }
 
-    payload = {
-        "model":
-            MEMORY_MODEL,
+    messages = [
+        {
+            "role":
+                "system",
 
-        "messages": [
-            {
-                "role":
-                    "system",
+            "content":
+                prompt,
+        },
+        {
+            "role":
+                "user",
 
-                "content":
-                    prompt
-            },
-            {
-                "role":
-                    "user",
-
-                "content":
-                    json.dumps(
-                        context,
-                        ensure_ascii=False
-                    )
-            }
-        ],
-
-        "stream":
-            False,
-
-        "format":
-            "json",
-
-        "options": {
-            "temperature": 0
-        }
-    }
+            "content":
+                json.dumps(
+                    context,
+                    ensure_ascii=False,
+                ),
+        },
+    ]
 
     try:
 
-        response = requests.post(
-            OLLAMA_CHAT_URL,
-            json=payload,
-            timeout=300
+        data = chat_once(
+            model=MEMORY_MODEL,
+            messages=messages,
+            response_format="json",
+            options={
+                "temperature": 0,
+            },
+            timeout=300,
         )
 
-        response.raise_for_status()
-
-        data = response.json()
-
         content = (
-            data[
-                "message"
-            ][
-                "content"
-            ].strip()
+            data
+            .get(
+                "message",
+                {},
+            )
+            .get(
+                "content",
+                "",
+            )
+            .strip()
         )
 
         result = json.loads(
@@ -1355,12 +962,12 @@ Do not include Markdown.
 
         actions = result.get(
             "actions",
-            []
+            [],
         )
 
         if not isinstance(
             actions,
-            list
+            list,
         ):
             return []
 
@@ -1384,7 +991,7 @@ Do not include Markdown.
 
 def process_automatic_memory(
     user_id,
-    user_message
+    user_message,
 ):
 
     if not AUTO_MEMORY:
@@ -1395,12 +1002,12 @@ def process_automatic_memory(
         print(
             "Memory: checking...",
             end="",
-            flush=True
+            flush=True,
         )
 
     actions = analyze_memory(
         user_id,
-        user_message
+        user_message,
     )
 
     if SHOW_MEMORY_ACTIVITY:
@@ -1410,7 +1017,7 @@ def process_automatic_memory(
             + " " * 80
             + "\r",
             end="",
-            flush=True
+            flush=True,
         )
 
     changes = []
@@ -1434,14 +1041,14 @@ def process_automatic_memory(
 
         if not isinstance(
             action_data,
-            dict
+            dict,
         ):
             continue
 
         action = str(
             action_data.get(
                 "action",
-                ""
+                "",
             )
         ).lower().strip()
 
@@ -1454,7 +1061,7 @@ def process_automatic_memory(
             content = str(
                 action_data.get(
                     "content",
-                    ""
+                    "",
                 )
             ).strip()
 
@@ -1470,7 +1077,7 @@ def process_automatic_memory(
             category = str(
                 action_data.get(
                     "category",
-                    "general"
+                    "general",
                 )
             ).strip().lower()
 
@@ -1478,7 +1085,7 @@ def process_automatic_memory(
                 clamp_importance(
                     action_data.get(
                         "importance",
-                        5
+                        5,
                     )
                 )
             )
@@ -1487,7 +1094,7 @@ def process_automatic_memory(
                 clamp_confidence(
                     action_data.get(
                         "confidence",
-                        0.8
+                        0.8,
                     )
                 )
             )
@@ -1498,7 +1105,7 @@ def process_automatic_memory(
             embedding = (
                 get_embedding(
                     content,
-                    show_error=False
+                    show_error=False,
                 )
             )
 
@@ -1523,7 +1130,7 @@ def process_automatic_memory(
                         "auto",
 
                     embedding=
-                        embedding
+                        embedding,
                 )
             )
 
@@ -1552,14 +1159,14 @@ def process_automatic_memory(
 
             except (
                 ValueError,
-                TypeError
+                TypeError,
             ):
                 continue
 
             existing = (
                 get_memory(
                     user_id,
-                    memory_id
+                    memory_id,
                 )
             )
 
@@ -1575,7 +1182,7 @@ def process_automatic_memory(
             content = str(
                 action_data.get(
                     "content",
-                    ""
+                    "",
                 )
             ).strip()
 
@@ -1585,7 +1192,7 @@ def process_automatic_memory(
             category = str(
                 action_data.get(
                     "category",
-                    existing[2]
+                    existing[2],
                 )
             ).strip().lower()
 
@@ -1593,7 +1200,7 @@ def process_automatic_memory(
                 clamp_importance(
                     action_data.get(
                         "importance",
-                        existing[3]
+                        existing[3],
                     )
                 )
             )
@@ -1602,7 +1209,7 @@ def process_automatic_memory(
                 clamp_confidence(
                     action_data.get(
                         "confidence",
-                        existing[4]
+                        existing[4],
                     )
                 )
             )
@@ -1610,7 +1217,7 @@ def process_automatic_memory(
             embedding = (
                 get_embedding(
                     content,
-                    show_error=False
+                    show_error=False,
                 )
             )
 
@@ -1634,7 +1241,7 @@ def process_automatic_memory(
                     confidence,
 
                 embedding=
-                    embedding
+                    embedding,
             ):
 
                 changes.append(
@@ -1658,7 +1265,7 @@ def process_automatic_memory(
 
             except (
                 ValueError,
-                TypeError
+                TypeError,
             ):
                 continue
 
@@ -1666,7 +1273,7 @@ def process_automatic_memory(
                 clamp_confidence(
                     action_data.get(
                         "decision_confidence",
-                        0
+                        0,
                     )
                 )
             )
@@ -1681,7 +1288,7 @@ def process_automatic_memory(
             existing = (
                 get_memory(
                     user_id,
-                    memory_id
+                    memory_id,
                 )
             )
 
@@ -1696,7 +1303,7 @@ def process_automatic_memory(
 
             if archive_memory(
                 user_id,
-                memory_id
+                memory_id,
             ):
 
                 changes.append(
@@ -1714,7 +1321,7 @@ def process_automatic_memory(
                 clamp_confidence(
                     action_data.get(
                         "decision_confidence",
-                        0
+                        0,
                     )
                 )
             )
@@ -1736,13 +1343,13 @@ def process_automatic_memory(
 
             except (
                 ValueError,
-                TypeError
+                TypeError,
             ):
                 continue
 
             target = get_memory(
                 user_id,
-                target_id
+                target_id,
             )
 
             if not target:
@@ -1757,13 +1364,13 @@ def process_automatic_memory(
             source_ids = (
                 action_data.get(
                     "source_memory_ids",
-                    []
+                    [],
                 )
             )
 
             if not isinstance(
                 source_ids,
-                list
+                list,
             ):
                 continue
 
@@ -1779,7 +1386,7 @@ def process_automatic_memory(
 
                 except (
                     ValueError,
-                    TypeError
+                    TypeError,
                 ):
                     continue
 
@@ -1789,7 +1396,7 @@ def process_automatic_memory(
                 source_memory = (
                     get_memory(
                         user_id,
-                        source_id
+                        source_id,
                     )
                 )
 
@@ -1809,14 +1416,14 @@ def process_automatic_memory(
             content = str(
                 action_data.get(
                     "content",
-                    target[1]
+                    target[1],
                 )
             ).strip()
 
             category = str(
                 action_data.get(
                     "category",
-                    target[2]
+                    target[2],
                 )
             ).strip().lower()
 
@@ -1824,7 +1431,7 @@ def process_automatic_memory(
                 clamp_importance(
                     action_data.get(
                         "importance",
-                        target[3]
+                        target[3],
                     )
                 )
             )
@@ -1833,7 +1440,7 @@ def process_automatic_memory(
                 clamp_confidence(
                     action_data.get(
                         "confidence",
-                        target[4]
+                        target[4],
                     )
                 )
             )
@@ -1841,7 +1448,7 @@ def process_automatic_memory(
             embedding = (
                 get_embedding(
                     content,
-                    show_error=False
+                    show_error=False,
                 )
             )
 
@@ -1865,7 +1472,7 @@ def process_automatic_memory(
                     memory_confidence,
 
                 embedding=
-                    embedding
+                    embedding,
             )
 
             if not updated:
@@ -1879,7 +1486,7 @@ def process_automatic_memory(
                     user_id,
                     source_id,
                     merged_into_id=
-                        target_id
+                        target_id,
                 ):
 
                     archived_sources.append(
@@ -1922,25 +1529,25 @@ def process_automatic_memory(
 def ask_ai(
     user_id,
     conversation_id,
-    message
+    message,
 ):
 
     save_message(
         conversation_id,
         user_id,
         "user",
-        message
+        message,
     )
 
     maybe_update_session_summary(
         user_id,
-        conversation_id
+        conversation_id,
     )
 
     messages = (
         build_session_context(
             user_id,
-            conversation_id
+            conversation_id,
         )
     )
 
@@ -1949,7 +1556,7 @@ def ask_ai(
             user_id,
             message,
             limit=
-                MEMORY_RETRIEVAL_LIMIT
+                MEMORY_RETRIEVAL_LIMIT,
         )
     )
 
@@ -1964,7 +1571,7 @@ def ask_ai(
 
                 for memory
                 in relevant_memories
-            ]
+            ],
         )
 
         memory_text = "\n".join(
@@ -2000,13 +1607,12 @@ def ask_ai(
 
                         "Recent explicit user statements "
                         "take priority over older memory."
-                    )
-            }
+                    ),
+            },
         )
 
     # -----------------------------------------------------
-    # Same identity/personality instruction
-    # regardless of which model answers.
+    # Shared identity/personality
     # -----------------------------------------------------
 
     messages.insert(
@@ -2030,8 +1636,8 @@ def ask_ai(
 
                     "Recent user statements take priority over "
                     "older summaries or memories."
-                )
-        }
+                ),
+        },
     )
 
     # -----------------------------------------------------
@@ -2052,65 +1658,46 @@ def ask_ai(
             f"→ {selected_model}"
         )
 
-    payload = {
-        "model":
-            selected_model,
-
-        "messages":
-            messages,
-
-        "stream":
-            True
-    }
-
     print(
         "AI: ",
         end="",
-        flush=True
+        flush=True,
     )
 
     full_response = ""
 
     try:
 
-        with requests.post(
-            OLLAMA_CHAT_URL,
-            json=payload,
-            stream=True,
-            timeout=600
-        ) as response:
+        for data in chat_stream(
+            model=selected_model,
+            messages=messages,
+            timeout=600,
+        ):
 
-            response.raise_for_status()
+            if "message" not in data:
+                continue
 
-            for line in response.iter_lines():
-
-                if not line:
-                    continue
-
-                data = json.loads(
-                    line
+            chunk = (
+                data[
+                    "message"
+                ].get(
+                    "content",
+                    "",
                 )
+            )
 
-                if "message" in data:
+            if not chunk:
+                continue
 
-                    chunk = (
-                        data[
-                            "message"
-                        ].get(
-                            "content",
-                            ""
-                        )
-                    )
+            full_response += (
+                chunk
+            )
 
-                    full_response += (
-                        chunk
-                    )
-
-                    print(
-                        chunk,
-                        end="",
-                        flush=True
-                    )
+            print(
+                chunk,
+                end="",
+                flush=True,
+            )
 
         print("\n")
 
@@ -2118,33 +1705,26 @@ def ask_ai(
             conversation_id,
             user_id,
             "assistant",
-            full_response
+            full_response,
         )
 
         process_automatic_memory(
             user_id,
-            message
+            message,
         )
 
-    except requests.exceptions.ConnectionError:
+    except OllamaConnectionError:
 
         print(
             "\n\nError: Could not connect "
             "to Ollama.\n"
         )
 
-    except requests.exceptions.RequestException as error:
+    except OllamaError as error:
 
         print(
-            f"\n\nOllama request error: "
+            f"\n\nOllama error: "
             f"{error}\n"
-        )
-
-    except json.JSONDecodeError:
-
-        print(
-            "\n\nError reading response "
-            "from Ollama.\n"
         )
 
 
@@ -2174,7 +1754,7 @@ def show_users():
 
 
 def show_current_user(
-    user_id
+    user_id,
 ):
 
     user = get_user(
@@ -2219,7 +1799,7 @@ def show_model_mode():
 
     print(
         f"\nCurrent model mode: "
-        f"{MODEL_MODE}"
+        f"{get_model_mode()}"
     )
 
     print(
@@ -2242,7 +1822,7 @@ def show_model_mode():
 # =========================================================
 
 def show_sessions(
-    user_id
+    user_id,
 ):
 
     conversations = (
@@ -2276,13 +1856,13 @@ def show_sessions(
 
 def show_session_summary(
     user_id,
-    conversation_id
+    conversation_id,
 ):
 
     info = (
         get_conversation_summary(
             conversation_id,
-            user_id
+            user_id,
         )
     )
 
@@ -2326,13 +1906,13 @@ def show_session_summary(
 
 def show_memories(
     user_id,
-    include_archived=False
+    include_archived=False,
 ):
 
     memories = load_memories(
         user_id,
         include_archived=
-            include_archived
+            include_archived,
     )
 
     if not memories:
@@ -2386,12 +1966,12 @@ def show_memories(
 
 def show_memory_details(
     user_id,
-    memory_id
+    memory_id,
 ):
 
     memory = get_memory(
         user_id,
-        memory_id
+        memory_id,
     )
 
     if not memory:
@@ -2464,14 +2044,14 @@ def show_memory_details(
 
 def show_relevant_memories(
     user_id,
-    query
+    query,
 ):
 
     results = (
         retrieve_relevant_memories(
             user_id,
             query,
-            limit=10
+            limit=10,
         )
     )
 
@@ -2539,7 +2119,7 @@ print(
 
 print(
     f"Model mode: "
-    f"{MODEL_MODE}"
+    f"{get_model_mode()}"
 )
 
 
@@ -2679,7 +2259,7 @@ while True:
     if command in [
         "/exit",
         "exit",
-        "quit"
+        "quit",
     ]:
 
         print(
@@ -2712,12 +2292,9 @@ while True:
             .strip()
         )
 
-        if requested_mode not in [
-            "auto",
-            "fast",
-            "default",
-            "deep"
-        ]:
+        if not set_model_mode(
+            requested_mode
+        ):
 
             print(
                 "\nUse one of:\n"
@@ -2729,13 +2306,9 @@ while True:
 
             continue
 
-        MODEL_MODE = (
-            requested_mode
-        )
-
         print(
             f"\nModel mode changed "
-            f"to: {MODEL_MODE}\n"
+            f"to: {get_model_mode()}\n"
         )
 
         continue
@@ -2807,7 +2380,7 @@ while True:
                 username,
 
             display_name=
-                display_name
+                display_name,
         )
 
         if new_user_id:
@@ -2954,7 +2527,7 @@ while True:
 
         show_session_summary(
             current_user_id,
-            conversation_id
+            conversation_id,
         )
 
         continue
@@ -2997,7 +2570,7 @@ while True:
 
         if not conversation_belongs_to_user(
             requested_id,
-            current_user_id
+            current_user_id,
         ):
 
             print(
@@ -3010,7 +2583,7 @@ while True:
         messages = (
             load_messages(
                 requested_id,
-                current_user_id
+                current_user_id,
             )
         )
 
@@ -3027,7 +2600,7 @@ while True:
 
             maybe_update_session_summary(
                 current_user_id,
-                conversation_id
+                conversation_id,
             )
 
         else:
@@ -3088,7 +2661,7 @@ while True:
                     "manual",
 
                 embedding=
-                    embedding
+                    embedding,
             )
         )
 
@@ -3109,7 +2682,7 @@ while True:
 
         show_memories(
             current_user_id,
-            include_archived=False
+            include_archived=False,
         )
 
         continue
@@ -3119,7 +2692,7 @@ while True:
 
         show_memories(
             current_user_id,
-            include_archived=True
+            include_archived=True,
         )
 
         continue
@@ -3162,7 +2735,7 @@ while True:
 
         show_memory_details(
             current_user_id,
-            memory_id
+            memory_id,
         )
 
         continue
@@ -3233,7 +2806,7 @@ while True:
                 "manual",
 
             embedding=
-                new_embedding
+                new_embedding,
         ):
 
             print(
@@ -3288,7 +2861,7 @@ while True:
 
         if archive_memory(
             current_user_id,
-            memory_id
+            memory_id,
         ):
 
             print(
@@ -3342,7 +2915,7 @@ while True:
 
         if restore_memory(
             current_user_id,
-            memory_id
+            memory_id,
         ):
 
             print(
@@ -3396,7 +2969,7 @@ while True:
 
         if delete_memory(
             current_user_id,
-            memory_id
+            memory_id,
         ):
 
             print(
@@ -3436,7 +3009,7 @@ while True:
 
         show_relevant_memories(
             current_user_id,
-            query
+            query,
         )
 
         continue
@@ -3460,5 +3033,5 @@ while True:
     ask_ai(
         current_user_id,
         conversation_id,
-        user_input
+        user_input,
     )
