@@ -40,6 +40,10 @@ from app.services.conversations import (
     maybe_generate_conversation_title,
 )
 
+from app.services.markdown import (
+    render_markdown,
+)
+
 
 api_bp = Blueprint(
     "api",
@@ -298,11 +302,35 @@ def conversation_messages(
         user_id,
     )
 
+    rendered_messages = []
+
+    for message in messages:
+        item = {
+            "role":
+                message["role"],
+            "content":
+                message["content"],
+        }
+
+        if (
+            message["role"]
+            == "assistant"
+        ):
+            item[
+                "rendered_html"
+            ] = render_markdown(
+                message["content"]
+            )
+
+        rendered_messages.append(
+            item
+        )
+
     return jsonify({
         "conversation_id":
             conversation_id,
         "messages":
-            messages,
+            rendered_messages,
     })
 
 
@@ -553,6 +581,18 @@ def chat_stream_api():
                 event.get("type")
                 == "response_complete"
             ):
+                yield _ndjson({
+                    "type":
+                        "rendered_content",
+                    "html":
+                        render_markdown(
+                            event.get(
+                                "response",
+                                "",
+                            )
+                        ),
+                })
+
                 yield _ndjson({
                     "type": "status",
                     "status": "naming",

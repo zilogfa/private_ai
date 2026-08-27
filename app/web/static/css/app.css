@@ -13,6 +13,19 @@
     --danger: #a12626;
     --success: #237a42;
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+
+    --code-bg: #f6f8fa;
+    --code-toolbar: #eef1f4;
+    --code-border: #d8dee4;
+    --code-text: #24292f;
+
+    --syntax-comment: #6e7781;
+    --syntax-keyword: #cf222e;
+    --syntax-name: #8250df;
+    --syntax-string: #0a3069;
+    --syntax-number: #0550ae;
+    --syntax-operator: #953800;
+    --syntax-builtin: #116329;
 }
 
 body[data-theme="dark"] {
@@ -30,6 +43,19 @@ body[data-theme="dark"] {
     --danger: #ff8e8e;
     --success: #70d394;
     --shadow: 0 10px 34px rgba(0, 0, 0, 0.28);
+
+    --code-bg: #151b23;
+    --code-toolbar: #1f2630;
+    --code-border: #36404c;
+    --code-text: #e6edf3;
+
+    --syntax-comment: #8b949e;
+    --syntax-keyword: #ff7b72;
+    --syntax-name: #d2a8ff;
+    --syntax-string: #a5d6ff;
+    --syntax-number: #79c0ff;
+    --syntax-operator: #ffa657;
+    --syntax-builtin: #7ee787;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,6 +74,19 @@ body[data-theme="dark"] {
         --danger: #ff8e8e;
         --success: #70d394;
         --shadow: 0 10px 34px rgba(0, 0, 0, 0.28);
+
+        --code-bg: #151b23;
+        --code-toolbar: #1f2630;
+        --code-border: #36404c;
+        --code-text: #e6edf3;
+
+        --syntax-comment: #8b949e;
+        --syntax-keyword: #ff7b72;
+        --syntax-name: #d2a8ff;
+        --syntax-string: #a5d6ff;
+        --syntax-number: #79c0ff;
+        --syntax-operator: #ffa657;
+        --syntax-builtin: #7ee787;
     }
 }
 
@@ -669,8 +708,12 @@ a {
 
 .message-text {
     line-height: 1.65;
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
+}
+
+.user-message .message-text,
+.assistant-content.streaming-plain {
+    white-space: pre-wrap;
 }
 
 .user-message .message-text {
@@ -683,6 +726,285 @@ a {
 .assistant-message .message-text {
     padding: 3px 0;
 }
+
+
+/* ======================================================
+   MARKDOWN / CODE RENDERING
+   ====================================================== */
+
+.rendered-markdown {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.rendered-markdown > :first-child {
+    margin-top: 0;
+}
+
+.rendered-markdown > :last-child {
+    margin-bottom: 0;
+}
+
+.rendered-markdown p {
+    margin: 0 0 1em;
+}
+
+.rendered-markdown h1,
+.rendered-markdown h2,
+.rendered-markdown h3,
+.rendered-markdown h4,
+.rendered-markdown h5,
+.rendered-markdown h6 {
+    margin: 1.4em 0 0.55em;
+    line-height: 1.25;
+}
+
+.rendered-markdown h1 {
+    font-size: 1.7rem;
+}
+
+.rendered-markdown h2 {
+    font-size: 1.4rem;
+}
+
+.rendered-markdown h3 {
+    font-size: 1.18rem;
+}
+
+.rendered-markdown h4,
+.rendered-markdown h5,
+.rendered-markdown h6 {
+    font-size: 1rem;
+}
+
+.rendered-markdown ul,
+.rendered-markdown ol {
+    margin: 0 0 1em;
+    padding-left: 1.6em;
+}
+
+.rendered-markdown li {
+    margin: 0.28em 0;
+}
+
+.rendered-markdown li > p {
+    margin: 0.35em 0;
+}
+
+.rendered-markdown blockquote {
+    margin: 1em 0;
+    padding: 0.1em 0 0.1em 1em;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+}
+
+.rendered-markdown hr {
+    margin: 1.4em 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+}
+
+.rendered-markdown a {
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.rendered-markdown > code,
+.rendered-markdown p code,
+.rendered-markdown li code,
+.rendered-markdown td code,
+.rendered-markdown th code {
+    padding: 0.14em 0.35em;
+    border: 1px solid var(--code-border);
+    border-radius: 6px;
+    background: var(--code-bg);
+    color: var(--code-text);
+    font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Monaco,
+        Consolas,
+        "Liberation Mono",
+        monospace;
+    font-size: 0.9em;
+}
+
+.rendered-markdown table {
+    width: 100%;
+    margin: 1em 0;
+    border-collapse: collapse;
+    display: block;
+    overflow-x: auto;
+}
+
+.rendered-markdown th,
+.rendered-markdown td {
+    min-width: 90px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    text-align: left;
+    vertical-align: top;
+}
+
+.rendered-markdown th {
+    background: var(--panel);
+    font-weight: 650;
+}
+
+.rendered-markdown input[type="checkbox"] {
+    margin-right: 7px;
+}
+
+.code-block {
+    margin: 1em 0;
+    overflow: hidden;
+    border: 1px solid var(--code-border);
+    border-radius: 12px;
+    background: var(--code-bg);
+    color: var(--code-text);
+}
+
+.code-toolbar {
+    min-height: 38px;
+    padding: 0 9px 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--code-border);
+    background: var(--code-toolbar);
+}
+
+.code-language {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: lowercase;
+}
+
+.code-copy-button {
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 7px;
+    padding: 5px 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.code-copy-button:hover {
+    background: var(--panel-strong);
+    color: var(--text);
+}
+
+.code-block pre {
+    margin: 0;
+    padding: 14px 16px;
+    overflow-x: auto;
+    tab-size: 4;
+}
+
+.code-block code {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--code-text);
+    font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Monaco,
+        Consolas,
+        "Liberation Mono",
+        monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre;
+}
+
+.code-content .c,
+.code-content .c1,
+.code-content .cm,
+.code-content .cp,
+.code-content .cs {
+    color: var(--syntax-comment);
+    font-style: italic;
+}
+
+.code-content .k,
+.code-content .kc,
+.code-content .kd,
+.code-content .kn,
+.code-content .kp,
+.code-content .kr,
+.code-content .kt {
+    color: var(--syntax-keyword);
+}
+
+.code-content .n,
+.code-content .na,
+.code-content .nb,
+.code-content .nc,
+.code-content .nd,
+.code-content .ne,
+.code-content .nf,
+.code-content .ni,
+.code-content .nl,
+.code-content .nn,
+.code-content .nt,
+.code-content .nv {
+    color: var(--syntax-name);
+}
+
+.code-content .s,
+.code-content .s1,
+.code-content .s2,
+.code-content .sa,
+.code-content .sb,
+.code-content .sc,
+.code-content .sd,
+.code-content .se,
+.code-content .sh,
+.code-content .si,
+.code-content .sr,
+.code-content .ss,
+.code-content .sx {
+    color: var(--syntax-string);
+}
+
+.code-content .m,
+.code-content .mb,
+.code-content .mf,
+.code-content .mh,
+.code-content .mi,
+.code-content .mo,
+.code-content .il {
+    color: var(--syntax-number);
+}
+
+.code-content .o,
+.code-content .ow {
+    color: var(--syntax-operator);
+}
+
+.code-content .bp {
+    color: var(--syntax-builtin);
+}
+
+.code-content .ge {
+    font-style: italic;
+}
+
+.code-content .gs {
+    font-weight: 700;
+}
+
 
 .assistant-meta {
     min-height: 20px;

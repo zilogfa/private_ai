@@ -486,7 +486,9 @@
         );
 
         content.className = (
-            "message-text"
+            "message-text "
+            + "assistant-content "
+            + "streaming-plain"
         );
 
         const status = document.createElement(
@@ -602,6 +604,148 @@
         assistant
     ) {
         assistant.status.hidden = true;
+    }
+
+
+    function enhanceRenderedContent(
+        container
+    ) {
+        container
+        .querySelectorAll("a")
+        .forEach(
+            (link) => {
+                link.target = "_blank";
+                link.rel = (
+                    "noopener noreferrer"
+                );
+            }
+        );
+    }
+
+
+    function applyRenderedHtml(
+        container,
+        renderedHtml
+    ) {
+        if (
+            typeof renderedHtml
+            !== "string"
+        ) {
+            return;
+        }
+
+        container.innerHTML = (
+            renderedHtml
+        );
+
+        container.classList.remove(
+            "streaming-plain"
+        );
+
+        container.classList.add(
+            "rendered-markdown"
+        );
+
+        enhanceRenderedContent(
+            container
+        );
+    }
+
+
+    async function copyCodeBlock(
+        button
+    ) {
+        const codeBlock = button.closest(
+            ".code-block"
+        );
+
+        const code = (
+            codeBlock
+            ?.querySelector(
+                "code"
+            )
+        );
+
+        if (!code) {
+            return;
+        }
+
+        const text = (
+            code.textContent
+            || ""
+        );
+
+        let copied = false;
+
+        try {
+            await navigator.clipboard
+            .writeText(
+                text
+            );
+
+            copied = true;
+
+        } catch (_) {
+            const textarea = (
+                document.createElement(
+                    "textarea"
+                )
+            );
+
+            textarea.value = text;
+            textarea.setAttribute(
+                "readonly",
+                ""
+            );
+
+            textarea.style.position = (
+                "fixed"
+            );
+
+            textarea.style.opacity = "0";
+
+            document.body.appendChild(
+                textarea
+            );
+
+            textarea.select();
+
+            try {
+                copied = document.execCommand(
+                    "copy"
+                );
+
+            } catch (_) {
+                copied = false;
+            }
+
+            textarea.remove();
+        }
+
+        if (!copied) {
+            showNotice(
+                "Could not copy code."
+            );
+
+            return;
+        }
+
+        const originalLabel = (
+            button.textContent
+        );
+
+        button.textContent = (
+            "Copied"
+        );
+
+        window.setTimeout(
+            () => {
+                button.textContent = (
+                    originalLabel
+                );
+            },
+            1400
+        );
     }
 
 
@@ -992,9 +1136,19 @@
                         const assistant =
                             createAssistantMessage();
 
-                        assistant.content.textContent = (
-                            message.content
-                        );
+                        if (
+                            message.rendered_html
+                        ) {
+                            applyRenderedHtml(
+                                assistant.content,
+                                message.rendered_html
+                            );
+
+                        } else {
+                            assistant.content.textContent = (
+                                message.content
+                            );
+                        }
 
                         finishStatus(
                             assistant
@@ -1108,8 +1262,19 @@
             case "response_complete":
                 setStatus(
                     assistant,
-                    "Finishing..."
+                    "Formatting..."
                 );
+
+                break;
+
+            case "rendered_content":
+                applyRenderedHtml(
+                    assistant.content,
+                    event.html
+                    || ""
+                );
+
+                scrollToBottom();
 
                 break;
 
@@ -1550,6 +1715,20 @@
     document.addEventListener(
         "click",
         (event) => {
+            const copyButton = (
+                event.target.closest(
+                    ".code-copy-button"
+                )
+            );
+
+            if (copyButton) {
+                copyCodeBlock(
+                    copyButton
+                );
+
+                return;
+            }
+
             if (
                 !event.target.closest(
                     ".conversation-menu-wrap"
