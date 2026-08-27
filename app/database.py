@@ -2406,6 +2406,157 @@ def list_conversations(
 
 
 # =========================================================
+# CONVERSATION MANAGEMENT
+# =========================================================
+
+def get_conversation(
+    conversation_id,
+    user_id,
+):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            title,
+            created_at
+
+        FROM conversations
+
+        WHERE
+            id = ?
+            AND user_id = ?
+        """,
+        (
+            conversation_id,
+            user_id,
+        )
+    )
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row
+
+
+def update_conversation_title(
+    conversation_id,
+    user_id,
+    title,
+    only_if_new=False,
+):
+    title = (
+        str(title or "")
+        .strip()
+    )
+
+    if not title:
+        return False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if only_if_new:
+        cursor.execute(
+            """
+            UPDATE conversations
+
+            SET title = ?
+
+            WHERE
+                id = ?
+                AND user_id = ?
+                AND (
+                    title IS NULL
+                    OR TRIM(title) = ''
+                    OR title = 'New Chat'
+                )
+            """,
+            (
+                title,
+                conversation_id,
+                user_id,
+            )
+        )
+
+    else:
+        cursor.execute(
+            """
+            UPDATE conversations
+
+            SET title = ?
+
+            WHERE
+                id = ?
+                AND user_id = ?
+            """,
+            (
+                title,
+                conversation_id,
+                user_id,
+            )
+        )
+
+    changed = cursor.rowcount
+
+    conn.commit()
+    conn.close()
+
+    return changed > 0
+
+
+def delete_conversation(
+    conversation_id,
+    user_id,
+):
+    if not conversation_belongs_to_user(
+        conversation_id,
+        user_id,
+    ):
+        return False
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM messages
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,)
+        )
+
+        cursor.execute(
+            """
+            DELETE FROM conversations
+
+            WHERE
+                id = ?
+                AND user_id = ?
+            """,
+            (
+                conversation_id,
+                user_id,
+            )
+        )
+
+        deleted = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+
+        return deleted > 0
+
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+# =========================================================
 # SESSION SUMMARIES
 # =========================================================
 

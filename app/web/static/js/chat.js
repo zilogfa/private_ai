@@ -18,99 +18,95 @@
         || ""
     );
 
-    const sidebar = (
-        document.getElementById(
-            "sidebar"
-        )
+    const sidebar = document.getElementById(
+        "sidebar"
     );
 
-    const sidebarOverlay = (
-        document.getElementById(
-            "sidebarOverlay"
-        )
+    const sidebarOverlay = document.getElementById(
+        "sidebarOverlay"
     );
 
-    const mobileMenuButton = (
-        document.getElementById(
-            "mobileMenuButton"
-        )
+    const mobileMenuButton = document.getElementById(
+        "mobileMenuButton"
     );
 
-    const newChatButton = (
+    const desktopSidebarCollapseButton =
         document.getElementById(
-            "newChatButton"
-        )
+            "desktopSidebarCollapseButton"
+        );
+
+    const desktopSidebarExpandButton =
+        document.getElementById(
+            "desktopSidebarExpandButton"
+        );
+
+    const sidebarResizeHandle =
+        document.getElementById(
+            "sidebarResizeHandle"
+        );
+
+    const newChatButton = document.getElementById(
+        "newChatButton"
     );
 
-    const conversationList = (
-        document.getElementById(
-            "conversationList"
-        )
+    const conversationList = document.getElementById(
+        "conversationList"
     );
 
-    const messages = (
-        document.getElementById(
-            "messages"
-        )
+    const messages = document.getElementById(
+        "messages"
     );
 
-    const welcomeState = (
-        document.getElementById(
-            "welcomeState"
-        )
+    const welcomeState = document.getElementById(
+        "welcomeState"
     );
 
-    const form = (
-        document.getElementById(
-            "composerForm"
-        )
+    const form = document.getElementById(
+        "composerForm"
     );
 
-    const input = (
-        document.getElementById(
-            "messageInput"
-        )
+    const input = document.getElementById(
+        "messageInput"
     );
 
-    const modelSelect = (
-        document.getElementById(
-            "modelSelect"
-        )
+    const modelSelect = document.getElementById(
+        "modelSelect"
     );
 
-    const sendButton = (
-        document.getElementById(
-            "sendButton"
-        )
+    const sendButton = document.getElementById(
+        "sendButton"
     );
 
-    const stopButton = (
-        document.getElementById(
-            "stopButton"
-        )
+    const stopButton = document.getElementById(
+        "stopButton"
     );
 
-    const attachmentButton = (
-        document.getElementById(
-            "attachmentButton"
-        )
+    const attachmentButton = document.getElementById(
+        "attachmentButton"
     );
 
-    const microphoneButton = (
-        document.getElementById(
-            "microphoneButton"
-        )
+    const microphoneButton = document.getElementById(
+        "microphoneButton"
     );
 
-    const attachmentNotice = (
-        document.getElementById(
-            "attachmentNotice"
-        )
+    const attachmentNotice = document.getElementById(
+        "attachmentNotice"
     );
+
+    const SIDEBAR_WIDTH_KEY =
+        "private_ai_sidebar_width";
+
+    const SIDEBAR_COLLAPSED_KEY =
+        "private_ai_sidebar_collapsed";
+
+    const MIN_SIDEBAR_WIDTH = 220;
+    const MAX_SIDEBAR_WIDTH = 380;
+    const DEFAULT_SIDEBAR_WIDTH = 280;
 
     let currentConversationId = null;
     let activeController = null;
     let generating = false;
+    let resizeActive = false;
 
     modelSelect.value = (
         app.dataset.defaultModel
@@ -121,6 +117,24 @@
     // =====================================================
     // UTILITIES
     // =====================================================
+
+    function isMobile() {
+        return window.matchMedia(
+            "(max-width: 760px)"
+        ).matches;
+    }
+
+
+    function clampSidebarWidth(width) {
+        return Math.max(
+            MIN_SIDEBAR_WIDTH,
+            Math.min(
+                MAX_SIDEBAR_WIDTH,
+                width
+            )
+        );
+    }
+
 
     function scrollToBottom() {
         messages.scrollTop = (
@@ -143,7 +157,7 @@
     }
 
 
-    function closeSidebar() {
+    function closeMobileSidebar() {
         sidebar.classList.remove(
             "open"
         );
@@ -154,13 +168,85 @@
     }
 
 
-    function openSidebar() {
+    function openMobileSidebar() {
         sidebar.classList.add(
             "open"
         );
 
         sidebarOverlay.classList.add(
             "open"
+        );
+    }
+
+
+    function setDesktopSidebarCollapsed(
+        collapsed,
+        persist = true
+    ) {
+        app.classList.toggle(
+            "sidebar-collapsed",
+            Boolean(collapsed)
+        );
+
+        if (persist) {
+            localStorage.setItem(
+                SIDEBAR_COLLAPSED_KEY,
+                collapsed
+                    ? "1"
+                    : "0"
+            );
+        }
+    }
+
+
+    function setSidebarWidth(
+        width,
+        persist = true
+    ) {
+        const safeWidth = (
+            clampSidebarWidth(
+                Number(width)
+                || DEFAULT_SIDEBAR_WIDTH
+            )
+        );
+
+        app.style.setProperty(
+            "--sidebar-width",
+            `${safeWidth}px`
+        );
+
+        if (persist) {
+            localStorage.setItem(
+                SIDEBAR_WIDTH_KEY,
+                String(safeWidth)
+            );
+        }
+    }
+
+
+    function applySidebarPreferences() {
+        const savedWidth = Number(
+            localStorage.getItem(
+                SIDEBAR_WIDTH_KEY
+            )
+        );
+
+        setSidebarWidth(
+            savedWidth
+            || DEFAULT_SIDEBAR_WIDTH,
+            false
+        );
+
+        const collapsed = (
+            localStorage.getItem(
+                SIDEBAR_COLLAPSED_KEY
+            )
+            === "1"
+        );
+
+        setDesktopSidebarCollapsed(
+            collapsed,
+            false
         );
     }
 
@@ -177,6 +263,21 @@
                 attachmentNotice.hidden = true;
             },
             3200
+        );
+    }
+
+
+    function closeConversationMenus() {
+        document
+        .querySelectorAll(
+            ".conversation-menu.open"
+        )
+        .forEach(
+            (menu) => {
+                menu.classList.remove(
+                    "open"
+                );
+            }
         );
     }
 
@@ -265,30 +366,24 @@
     function createUserMessage(text) {
         hideWelcome();
 
-        const article = (
-            document.createElement(
-                "article"
-            )
+        const article = document.createElement(
+            "article"
         );
 
         article.className = (
             "message user-message"
         );
 
-        const inner = (
-            document.createElement(
-                "div"
-            )
+        const inner = document.createElement(
+            "div"
         );
 
         inner.className = (
             "message-inner"
         );
 
-        const content = (
-            document.createElement(
-                "div"
-            )
+        const content = document.createElement(
+            "div"
         );
 
         content.className = (
@@ -318,40 +413,32 @@
     function createAssistantMessage() {
         hideWelcome();
 
-        const article = (
-            document.createElement(
-                "article"
-            )
+        const article = document.createElement(
+            "article"
         );
 
         article.className = (
             "message assistant-message"
         );
 
-        const inner = (
-            document.createElement(
-                "div"
-            )
+        const inner = document.createElement(
+            "div"
         );
 
         inner.className = (
             "message-inner"
         );
 
-        const meta = (
-            document.createElement(
-                "div"
-            )
+        const meta = document.createElement(
+            "div"
         );
 
         meta.className = (
             "assistant-meta"
         );
 
-        const modelTag = (
-            document.createElement(
-                "span"
-            )
+        const modelTag = document.createElement(
+            "span"
         );
 
         modelTag.className = (
@@ -362,10 +449,8 @@
             modelTag
         );
 
-        const thinking = (
-            document.createElement(
-                "details"
-            )
+        const thinking = document.createElement(
+            "details"
         );
 
         thinking.className = (
@@ -374,21 +459,18 @@
 
         thinking.hidden = true;
 
-        const summary = (
-            document.createElement(
-                "summary"
-            )
+        const summary = document.createElement(
+            "summary"
         );
 
         summary.textContent = (
             "Thinking..."
         );
 
-        const thinkingContent = (
+        const thinkingContent =
             document.createElement(
                 "div"
-            )
-        );
+            );
 
         thinkingContent.className = (
             "thinking-content"
@@ -399,41 +481,34 @@
             thinkingContent
         );
 
-        const content = (
-            document.createElement(
-                "div"
-            )
+        const content = document.createElement(
+            "div"
         );
 
         content.className = (
             "message-text"
         );
 
-        const status = (
-            document.createElement(
-                "div"
-            )
+        const status = document.createElement(
+            "div"
         );
 
         status.className = (
             "status-row"
         );
 
-        const statusDot = (
-            document.createElement(
-                "span"
-            )
+        const statusDot = document.createElement(
+            "span"
         );
 
         statusDot.className = (
             "status-dot"
         );
 
-        const statusLabel = (
+        const statusLabel =
             document.createElement(
                 "span"
-            )
-        );
+            );
 
         statusLabel.textContent = (
             "Preparing..."
@@ -476,10 +551,8 @@
     function createImageGenerationPlaceholder(
         label = "Generating image..."
     ) {
-        const template = (
-            document.getElementById(
-                "imageGenerationTemplate"
-            )
+        const template = document.getElementById(
+            "imageGenerationTemplate"
         );
 
         const fragment = (
@@ -488,17 +561,14 @@
             )
         );
 
-        const card = (
-            fragment.querySelector(
-                ".image-generation-card"
-            )
+        const card = fragment.querySelector(
+            ".image-generation-card"
         );
 
-        const labelElement = (
+        const labelElement =
             fragment.querySelector(
                 ".image-generation-label"
-            )
-        );
+            );
 
         labelElement.textContent = (
             label
@@ -536,6 +606,280 @@
 
 
     // =====================================================
+    // CONVERSATION ACTIONS
+    // =====================================================
+
+    async function renameConversation(
+        conversation
+    ) {
+        closeConversationMenus();
+
+        const requestedTitle = window.prompt(
+            "Rename chat:",
+            conversation.title
+            || "New Chat"
+        );
+
+        if (requestedTitle === null) {
+            return;
+        }
+
+        const title = requestedTitle.trim();
+
+        if (!title) {
+            showNotice(
+                "Chat name cannot be empty."
+            );
+
+            return;
+        }
+
+        try {
+            await requestJson(
+                (
+                    "/api/conversations/"
+                    + conversation.id
+                ),
+                {
+                    method: "PATCH",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                    },
+
+                    body: JSON.stringify({
+                        title,
+                    }),
+                }
+            );
+
+            await refreshConversations();
+
+        } catch (error) {
+            showNotice(
+                error.message
+            );
+        }
+    }
+
+
+    async function removeConversation(
+        conversation
+    ) {
+        closeConversationMenus();
+
+        const confirmed = window.confirm(
+            (
+                'Delete "'
+                + (
+                    conversation.title
+                    || "New Chat"
+                )
+                + '"?\n\n'
+                + "This removes the chat history permanently."
+            )
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            await requestJson(
+                (
+                    "/api/conversations/"
+                    + conversation.id
+                ),
+                {
+                    method: "DELETE",
+                }
+            );
+
+            if (
+                conversation.id
+                === currentConversationId
+            ) {
+                startNewChat();
+            }
+
+            await refreshConversations();
+
+        } catch (error) {
+            showNotice(
+                error.message
+            );
+        }
+    }
+
+
+    function createConversationRow(
+        conversation
+    ) {
+        const row = document.createElement(
+            "div"
+        );
+
+        row.className = (
+            "conversation-row"
+        );
+
+        if (
+            conversation.id
+            === currentConversationId
+        ) {
+            row.classList.add(
+                "active"
+            );
+        }
+
+        const openButton = document.createElement(
+            "button"
+        );
+
+        openButton.type = "button";
+        openButton.className = (
+            "conversation-item"
+        );
+
+        openButton.textContent = (
+            conversation.title
+            || "New Chat"
+        );
+
+        openButton.title = (
+            conversation.title
+            || "New Chat"
+        );
+
+        openButton.addEventListener(
+            "click",
+            () => {
+                loadConversation(
+                    conversation.id
+                );
+            }
+        );
+
+        const menuWrap = document.createElement(
+            "div"
+        );
+
+        menuWrap.className = (
+            "conversation-menu-wrap"
+        );
+
+        const menuButton = document.createElement(
+            "button"
+        );
+
+        menuButton.type = "button";
+        menuButton.className = (
+            "conversation-menu-button"
+        );
+
+        menuButton.textContent = "⋯";
+        menuButton.setAttribute(
+            "aria-label",
+            (
+                "Chat options for "
+                + (
+                    conversation.title
+                    || "New Chat"
+                )
+            )
+        );
+
+        const menu = document.createElement(
+            "div"
+        );
+
+        menu.className = (
+            "conversation-menu"
+        );
+
+        const renameButton =
+            document.createElement(
+                "button"
+            );
+
+        renameButton.type = "button";
+        renameButton.textContent = (
+            "Rename"
+        );
+
+        renameButton.addEventListener(
+            "click",
+            () => {
+                renameConversation(
+                    conversation
+                );
+            }
+        );
+
+        const deleteButton =
+            document.createElement(
+                "button"
+            );
+
+        deleteButton.type = "button";
+        deleteButton.className = (
+            "danger"
+        );
+
+        deleteButton.textContent = (
+            "Delete"
+        );
+
+        deleteButton.addEventListener(
+            "click",
+            () => {
+                removeConversation(
+                    conversation
+                );
+            }
+        );
+
+        menu.append(
+            renameButton,
+            deleteButton
+        );
+
+        menuButton.addEventListener(
+            "click",
+            (event) => {
+                event.stopPropagation();
+
+                const wasOpen =
+                    menu.classList.contains(
+                        "open"
+                    );
+
+                closeConversationMenus();
+
+                if (!wasOpen) {
+                    menu.classList.add(
+                        "open"
+                    );
+                }
+            }
+        );
+
+        menuWrap.append(
+            menuButton,
+            menu
+        );
+
+        row.append(
+            openButton,
+            menuWrap
+        );
+
+        return row;
+    }
+
+
+    // =====================================================
     // CONVERSATIONS
     // =====================================================
 
@@ -550,10 +894,8 @@
             if (
                 !data.conversations.length
             ) {
-                const empty = (
-                    document.createElement(
-                        "div"
-                    )
+                const empty = document.createElement(
+                    "div"
                 );
 
                 empty.className = (
@@ -575,53 +917,18 @@
                 const conversation
                 of data.conversations
             ) {
-                const button = (
-                    document.createElement(
-                        "button"
-                    )
-                );
-
-                button.type = "button";
-
-                button.className = (
-                    "conversation-item"
-                );
-
-                if (
-                    conversation.id
-                    === currentConversationId
-                ) {
-                    button.classList.add(
-                        "active"
-                    );
-                }
-
-                button.textContent = (
-                    conversation.title
-                    || "New Chat"
-                );
-
-                button.addEventListener(
-                    "click",
-                    () => {
-                        loadConversation(
-                            conversation.id
-                        );
-                    }
-                );
-
                 conversationList.appendChild(
-                    button
+                    createConversationRow(
+                        conversation
+                    )
                 );
             }
 
         } catch (error) {
             conversationList.innerHTML = "";
 
-            const failed = (
-                document.createElement(
-                    "div"
-                )
+            const failed = document.createElement(
+                "div"
             );
 
             failed.className = (
@@ -682,9 +989,8 @@
                         );
 
                     } else {
-                        const assistant = (
-                            createAssistantMessage()
-                        );
+                        const assistant =
+                            createAssistantMessage();
 
                         assistant.content.textContent = (
                             message.content
@@ -699,7 +1005,7 @@
 
             await refreshConversations();
 
-            closeSidebar();
+            closeMobileSidebar();
 
             input.focus();
 
@@ -728,7 +1034,7 @@
 
         refreshConversations();
 
-        closeSidebar();
+        closeMobileSidebar();
 
         input.focus();
     }
@@ -748,6 +1054,11 @@
                     event.conversation_id
                 );
 
+                refreshConversations();
+
+                break;
+
+            case "conversation_title":
                 refreshConversations();
 
                 break;
@@ -1041,6 +1352,79 @@
 
 
     // =====================================================
+    // SIDEBAR RESIZE
+    // =====================================================
+
+    function startSidebarResize(event) {
+        if (isMobile()) {
+            return;
+        }
+
+        resizeActive = true;
+
+        document.body.classList.add(
+            "sidebar-resizing"
+        );
+
+        sidebarResizeHandle.setPointerCapture(
+            event.pointerId
+        );
+
+        event.preventDefault();
+    }
+
+
+    function moveSidebarResize(event) {
+        if (
+            !resizeActive
+            || isMobile()
+        ) {
+            return;
+        }
+
+        setSidebarWidth(
+            event.clientX,
+            false
+        );
+    }
+
+
+    function finishSidebarResize(event) {
+        if (!resizeActive) {
+            return;
+        }
+
+        resizeActive = false;
+
+        document.body.classList.remove(
+            "sidebar-resizing"
+        );
+
+        const width = parseFloat(
+            getComputedStyle(app)
+            .getPropertyValue(
+                "--sidebar-width"
+            )
+        );
+
+        setSidebarWidth(
+            width,
+            true
+        );
+
+        try {
+            sidebarResizeHandle
+            .releasePointerCapture(
+                event.pointerId
+            );
+
+        } catch (_) {
+            // Pointer may already be released.
+        }
+    }
+
+
+    // =====================================================
     // EVENTS
     // =====================================================
 
@@ -1106,13 +1490,84 @@
 
     mobileMenuButton.addEventListener(
         "click",
-        openSidebar
+        openMobileSidebar
     );
 
 
     sidebarOverlay.addEventListener(
         "click",
-        closeSidebar
+        closeMobileSidebar
+    );
+
+
+    desktopSidebarCollapseButton
+    .addEventListener(
+        "click",
+        () => {
+            if (!isMobile()) {
+                setDesktopSidebarCollapsed(
+                    true
+                );
+            }
+        }
+    );
+
+
+    desktopSidebarExpandButton
+    .addEventListener(
+        "click",
+        () => {
+            if (!isMobile()) {
+                setDesktopSidebarCollapsed(
+                    false
+                );
+            }
+        }
+    );
+
+
+    sidebarResizeHandle.addEventListener(
+        "pointerdown",
+        startSidebarResize
+    );
+
+    sidebarResizeHandle.addEventListener(
+        "pointermove",
+        moveSidebarResize
+    );
+
+    sidebarResizeHandle.addEventListener(
+        "pointerup",
+        finishSidebarResize
+    );
+
+    sidebarResizeHandle.addEventListener(
+        "pointercancel",
+        finishSidebarResize
+    );
+
+
+    document.addEventListener(
+        "click",
+        (event) => {
+            if (
+                !event.target.closest(
+                    ".conversation-menu-wrap"
+                )
+            ) {
+                closeConversationMenus();
+            }
+        }
+    );
+
+
+    window.addEventListener(
+        "resize",
+        () => {
+            if (!isMobile()) {
+                closeMobileSidebar();
+            }
+        }
     );
 
 
@@ -1170,13 +1625,15 @@
     // START
     // =====================================================
 
+    applySidebarPreferences();
+
     autoResizeInput();
 
     refreshConversations();
 
     input.focus();
 
-    // Reserved for the future image-generation service:
+    // Reserved for future image-generation service:
     // createImageGenerationPlaceholder("Generating image...");
     void createImageGenerationPlaceholder;
 })();

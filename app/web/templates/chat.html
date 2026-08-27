@@ -24,7 +24,20 @@
         <div class="sidebar-top">
             <div class="sidebar-brand">
                 <div class="brand-mark small">P</div>
-                <span>Private AI</span>
+
+                <span class="sidebar-brand-label">
+                    Private AI
+                </span>
+
+                <button
+                    id="desktopSidebarCollapseButton"
+                    class="sidebar-collapse-button"
+                    type="button"
+                    aria-label="Collapse sidebar"
+                    title="Collapse sidebar"
+                >
+                    ‹
+                </button>
             </div>
 
             <button
@@ -100,6 +113,15 @@
                 </div>
             </div>
         </div>
+
+        <div
+            id="sidebarResizeHandle"
+            class="sidebar-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            title="Drag to resize sidebar"
+        ></div>
     </aside>
 
     <main class="chat-main">
@@ -111,6 +133,16 @@
                 aria-label="Open sidebar"
             >
                 ☰
+            </button>
+
+            <button
+                id="desktopSidebarExpandButton"
+                class="icon-button desktop-sidebar-expand"
+                type="button"
+                aria-label="Open sidebar"
+                title="Open sidebar"
+            >
+                ›
             </button>
 
             <div class="chat-title">

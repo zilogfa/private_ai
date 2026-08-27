@@ -22,15 +22,22 @@ from app.config import (
 from app.database import (
     conversation_belongs_to_user,
     create_conversation,
+    delete_conversation,
     get_user_roles,
     get_user_settings,
     list_conversations,
     load_messages,
+    update_conversation_title,
     update_user_settings,
 )
 
 from app.services.chat import (
     stream_chat,
+)
+
+from app.services.conversations import (
+    clean_conversation_title,
+    maybe_generate_conversation_title,
 )
 
 
@@ -159,6 +166,107 @@ def create_chat():
         }),
         201,
     )
+
+
+@api_bp.patch(
+    "/conversations/"
+    "<int:conversation_id>"
+)
+@permission_required("chat.use")
+def rename_conversation(
+    conversation_id,
+):
+    user_id = (
+        get_current_user_id()
+    )
+
+    if not conversation_belongs_to_user(
+        conversation_id,
+        user_id,
+    ):
+        return (
+            jsonify({
+                "error":
+                    "conversation_not_found"
+            }),
+            404,
+        )
+
+    payload = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    )
+
+    title = (
+        clean_conversation_title(
+            payload.get(
+                "title"
+            )
+        )
+    )
+
+    if not title:
+        return (
+            jsonify({
+                "error":
+                    "title_required"
+            }),
+            400,
+        )
+
+    if not update_conversation_title(
+        conversation_id=
+            conversation_id,
+        user_id=
+            user_id,
+        title=
+            title,
+    ):
+        return (
+            jsonify({
+                "error":
+                    "conversation_not_found"
+            }),
+            404,
+        )
+
+    return jsonify({
+        "id": conversation_id,
+        "title": title,
+    })
+
+
+@api_bp.delete(
+    "/conversations/"
+    "<int:conversation_id>"
+)
+@permission_required("chat.use")
+def remove_conversation(
+    conversation_id,
+):
+    user_id = (
+        get_current_user_id()
+    )
+
+    if not delete_conversation(
+        conversation_id,
+        user_id,
+    ):
+        return (
+            jsonify({
+                "error":
+                    "conversation_not_found"
+            }),
+            404,
+        )
+
+    return jsonify({
+        "deleted": True,
+        "conversation_id":
+            conversation_id,
+    })
 
 
 @api_bp.get(
@@ -440,6 +548,42 @@ def chat_stream_api():
             yield _ndjson(
                 event
             )
+
+            if (
+                event.get("type")
+                == "response_complete"
+            ):
+                yield _ndjson({
+                    "type": "status",
+                    "status": "naming",
+                    "label": "Naming chat...",
+                })
+
+                title = (
+                    maybe_generate_conversation_title(
+                        user_id=
+                            user_id,
+                        conversation_id=
+                            conversation_id,
+                        user_message=
+                            user_message,
+                        assistant_response=
+                            event.get(
+                                "response",
+                                "",
+                            ),
+                    )
+                )
+
+                if title:
+                    yield _ndjson({
+                        "type":
+                            "conversation_title",
+                        "conversation_id":
+                            conversation_id,
+                        "title":
+                            title,
+                    })
 
     response = Response(
         generate(),
