@@ -21,6 +21,10 @@ from app.database import (
     initialize_database,
 )
 
+from app.services.attachments import (
+    initialize_attachment_storage,
+)
+
 
 def _load_or_create_secret_key():
     environment_key = (
@@ -95,6 +99,8 @@ def create_app():
         parents=True,
         exist_ok=True,
     )
+
+    initialize_attachment_storage()
 
     app = Flask(
         __name__,

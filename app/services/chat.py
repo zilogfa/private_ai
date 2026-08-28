@@ -27,6 +27,11 @@ from app.sessions import (
     build_session_context,
 )
 
+from app.services.attachments import (
+    bind_attachments_to_message,
+    build_unprocessed_attachment_note,
+)
+
 
 # =========================================================
 # SYSTEM PROMPT
@@ -155,12 +160,17 @@ def stream_chat(
     user_message,
     model_mode=None,
     include_thinking=True,
+    attachments=None,
 ):
     """
     Shared UI-independent chat pipeline.
 
     Web requests should pass model_mode explicitly.
     Terminal requests may leave it as None.
+
+    attachments contains already validated attachment
+    metadata. v1.0 stores and associates files, but does
+    not inspect file contents yet.
 
     Standard event families:
         status
@@ -175,6 +185,10 @@ def stream_chat(
     and image generation can reuse the same event pattern.
     """
 
+    attachments = list(
+        attachments or []
+    )
+
     yield {
         "type": "status",
         "status": "preparing",
@@ -185,12 +199,27 @@ def stream_chat(
     # Save user message
     # -----------------------------------------------------
 
-    save_message(
+    user_message_id = save_message(
         conversation_id,
         user_id,
         "user",
         user_message,
     )
+
+    if attachments:
+        bind_attachments_to_message(
+            user_id=
+                user_id,
+            conversation_id=
+                conversation_id,
+            message_id=
+                user_message_id,
+            attachment_ids=[
+                attachment["id"]
+                for attachment
+                in attachments
+            ],
+        )
 
     # -----------------------------------------------------
     # Session summary maintenance
@@ -210,6 +239,26 @@ def stream_chat(
         conversation_id,
         user_message,
     )
+
+    attachment_note = (
+        build_unprocessed_attachment_note(
+            attachments
+        )
+    )
+
+    if attachment_note:
+        insert_at = max(
+            len(messages) - 1,
+            1,
+        )
+
+        messages.insert(
+            insert_at,
+            {
+                "role": "system",
+                "content": attachment_note,
+            },
+        )
 
     # -----------------------------------------------------
     # Model routing

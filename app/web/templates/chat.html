@@ -203,6 +203,21 @@
                 hidden
             ></div>
 
+            <div
+                id="pendingAttachments"
+                class="pending-attachments"
+                hidden
+                aria-live="polite"
+            ></div>
+
+            <input
+                id="attachmentInput"
+                class="sr-only"
+                type="file"
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.csv,.json,.docx,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv,application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                multiple
+            >
+
             <form
                 id="composerForm"
                 class="composer"
@@ -212,7 +227,7 @@
                     class="composer-icon-button"
                     type="button"
                     aria-label="Add attachment"
-                    title="Image and document upload foundation"
+                    title="Attach image or document"
                 >
                     ＋
                 </button>

@@ -85,6 +85,15 @@
         "attachmentButton"
     );
 
+    const attachmentInput = document.getElementById(
+        "attachmentInput"
+    );
+
+    const pendingAttachmentsElement =
+        document.getElementById(
+            "pendingAttachments"
+        );
+
     const microphoneButton = document.getElementById(
         "microphoneButton"
     );
@@ -103,10 +112,17 @@
     const MAX_SIDEBAR_WIDTH = 380;
     const DEFAULT_SIDEBAR_WIDTH = 280;
 
+    const MAX_ATTACHMENTS = 4;
+    const MAX_ATTACHMENT_BYTES = (
+        25 * 1024 * 1024
+    );
+
     let currentConversationId = null;
     let activeController = null;
     let generating = false;
     let resizeActive = false;
+    let attachmentUploadActive = false;
+    let pendingAttachments = [];
 
     modelSelect.value = (
         app.dataset.defaultModel
@@ -405,10 +421,492 @@
 
 
     // =====================================================
+    // ATTACHMENTS
+    // =====================================================
+
+    function formatFileSize(bytes) {
+        const value = Number(bytes || 0);
+
+        if (value < 1024) {
+            return `${value} B`;
+        }
+
+        if (value < 1024 * 1024) {
+            return (
+                `${(value / 1024).toFixed(1)} KB`
+            );
+        }
+
+        return (
+            `${(value / (1024 * 1024)).toFixed(1)} MB`
+        );
+    }
+
+
+    function attachmentTypeLabel(
+        attachment
+    ) {
+        const name = (
+            attachment.name
+            || "Attachment"
+        );
+
+        const extension = (
+            name.includes(".")
+            ? name.split(".").pop().toUpperCase()
+            : "FILE"
+        );
+
+        if (attachment.kind === "image") {
+            return "Image";
+        }
+
+        return extension;
+    }
+
+
+    function createAttachmentCard(
+        attachment,
+        removable = false
+    ) {
+        const card = document.createElement(
+            removable ? "div" : "a"
+        );
+
+        card.className = (
+            "attachment-card"
+            + (
+                removable
+                ? " pending-attachment-card"
+                : ""
+            )
+        );
+
+        if (!removable) {
+            card.href = (
+                attachment.content_url
+                || "#"
+            );
+            card.target = "_blank";
+            card.rel = (
+                "noopener noreferrer"
+            );
+        }
+
+        const visual = document.createElement(
+            "div"
+        );
+
+        visual.className = (
+            "attachment-visual"
+        );
+
+        if (
+            attachment.kind === "image"
+            && attachment.content_url
+        ) {
+            const image = document.createElement(
+                "img"
+            );
+
+            image.src = attachment.content_url;
+            image.alt = "";
+            image.loading = "lazy";
+
+            visual.appendChild(image);
+
+        } else {
+            const badge = document.createElement(
+                "span"
+            );
+
+            badge.textContent = (
+                attachmentTypeLabel(
+                    attachment
+                )
+            );
+
+            visual.appendChild(badge);
+        }
+
+        const meta = document.createElement(
+            "div"
+        );
+
+        meta.className = (
+            "attachment-meta"
+        );
+
+        const name = document.createElement(
+            "strong"
+        );
+
+        name.className = (
+            "attachment-name"
+        );
+
+        name.textContent = (
+            attachment.name
+            || "Attachment"
+        );
+
+        const detail = document.createElement(
+            "small"
+        );
+
+        detail.textContent = (
+            attachmentTypeLabel(
+                attachment
+            )
+            + " · "
+            + formatFileSize(
+                attachment.size_bytes
+            )
+        );
+
+        meta.append(
+            name,
+            detail
+        );
+
+        card.append(
+            visual,
+            meta
+        );
+
+        if (removable) {
+            const remove = document.createElement(
+                "button"
+            );
+
+            remove.type = "button";
+            remove.className = (
+                "attachment-remove-button"
+            );
+            remove.setAttribute(
+                "aria-label",
+                `Remove ${attachment.name || "attachment"}`
+            );
+            remove.title = "Remove attachment";
+            remove.textContent = "×";
+
+            remove.addEventListener(
+                "click",
+                () => {
+                    removePendingAttachment(
+                        attachment.id
+                    );
+                }
+            );
+
+            card.appendChild(remove);
+        }
+
+        return card;
+    }
+
+
+    function appendMessageAttachments(
+        container,
+        attachments
+    ) {
+        if (!attachments?.length) {
+            return;
+        }
+
+        const list = document.createElement(
+            "div"
+        );
+
+        list.className = (
+            "message-attachments"
+        );
+
+        for (const attachment of attachments) {
+            list.appendChild(
+                createAttachmentCard(
+                    attachment,
+                    false
+                )
+            );
+        }
+
+        container.appendChild(list);
+    }
+
+
+    function renderPendingAttachments() {
+        pendingAttachmentsElement.innerHTML = "";
+
+        if (!pendingAttachments.length) {
+            pendingAttachmentsElement.hidden = true;
+            return;
+        }
+
+        pendingAttachmentsElement.hidden = false;
+
+        for (
+            const attachment
+            of pendingAttachments
+        ) {
+            pendingAttachmentsElement.appendChild(
+                createAttachmentCard(
+                    attachment,
+                    true
+                )
+            );
+        }
+    }
+
+
+    async function removePendingAttachment(
+        attachmentId
+    ) {
+        const attachment = (
+            pendingAttachments.find(
+                (item) => (
+                    item.id === attachmentId
+                )
+            )
+        );
+
+        pendingAttachments = (
+            pendingAttachments.filter(
+                (item) => (
+                    item.id !== attachmentId
+                )
+            )
+        );
+
+        renderPendingAttachments();
+
+        if (!attachment) {
+            return;
+        }
+
+        try {
+            await requestJson(
+                (
+                    "/api/attachments/"
+                    + encodeURIComponent(
+                        attachmentId
+                    )
+                ),
+                {
+                    method: "DELETE",
+                }
+            );
+
+        } catch (_) {
+            // Stale pending files are cleaned server-side.
+        }
+    }
+
+
+    function discardPendingAttachments() {
+        const stale = [
+            ...pendingAttachments
+        ];
+
+        pendingAttachments = [];
+        renderPendingAttachments();
+
+        for (const attachment of stale) {
+            fetch(
+                (
+                    "/api/attachments/"
+                    + encodeURIComponent(
+                        attachment.id
+                    )
+                ),
+                {
+                    method: "DELETE",
+                    headers: {
+                        "X-CSRF-Token":
+                            csrfToken,
+                    },
+                    keepalive: true,
+                }
+            ).catch(
+                () => {}
+            );
+        }
+    }
+
+
+    function uploadErrorMessage(code) {
+        const messagesByCode = {
+            unsupported_file_type:
+                "That file type is not supported yet.",
+            file_too_large:
+                "That file is larger than 25 MB.",
+            empty_file:
+                "That file is empty.",
+            file_required:
+                "No file was selected.",
+            conversation_not_found:
+                "That chat is no longer available.",
+        };
+
+        return (
+            messagesByCode[code]
+            || code
+            || "Attachment upload failed."
+        );
+    }
+
+
+    async function uploadAttachment(file) {
+        const formData = new FormData();
+
+        formData.append(
+            "file",
+            file
+        );
+
+        if (currentConversationId) {
+            formData.append(
+                "conversation_id",
+                currentConversationId
+            );
+        }
+
+        const response = await fetch(
+            "/api/attachments",
+            {
+                method: "POST",
+                headers: {
+                    "X-CSRF-Token":
+                        csrfToken,
+                },
+                body: formData,
+            }
+        );
+
+        if (response.status === 401) {
+            window.location.href = "/login";
+            throw new Error(
+                "Authentication required."
+            );
+        }
+
+        let data = {};
+
+        try {
+            data = await response.json();
+
+        } catch (_) {
+            // Keep fallback error.
+        }
+
+        if (!response.ok) {
+            throw new Error(
+                uploadErrorMessage(
+                    data.error
+                )
+            );
+        }
+
+        return data.attachment;
+    }
+
+
+    async function uploadFiles(fileList) {
+        if (
+            generating
+            || attachmentUploadActive
+        ) {
+            return;
+        }
+
+        const files = Array.from(
+            fileList || []
+        );
+
+        if (!files.length) {
+            return;
+        }
+
+        const slots = (
+            MAX_ATTACHMENTS
+            - pendingAttachments.length
+        );
+
+        if (slots <= 0) {
+            showNotice(
+                `Up to ${MAX_ATTACHMENTS} attachments per message.`
+            );
+            return;
+        }
+
+        const selected = files.slice(
+            0,
+            slots
+        );
+
+        if (files.length > slots) {
+            showNotice(
+                `Only ${MAX_ATTACHMENTS} attachments can be added to one message.`
+            );
+        }
+
+        attachmentUploadActive = true;
+        attachmentButton.disabled = true;
+
+        try {
+            for (const file of selected) {
+                if (file.size > MAX_ATTACHMENT_BYTES) {
+                    showNotice(
+                        `${file.name} is larger than 25 MB.`
+                    );
+                    continue;
+                }
+
+                showNotice(
+                    `Uploading ${file.name}...`
+                );
+
+                try {
+                    const attachment = (
+                        await uploadAttachment(
+                            file
+                        )
+                    );
+
+                    pendingAttachments.push(
+                        attachment
+                    );
+
+                    renderPendingAttachments();
+
+                } catch (error) {
+                    showNotice(
+                        error.message
+                    );
+                }
+            }
+
+        } finally {
+            attachmentUploadActive = false;
+            attachmentButton.disabled = false;
+
+            if (pendingAttachments.length) {
+                showNotice(
+                    "Attachment stored locally. File analysis is connected in the next capability step."
+                );
+            }
+        }
+    }
+
+
+    // =====================================================
     // MESSAGE RENDERING
     // =====================================================
 
-    function createUserMessage(text) {
+    function createUserMessage(
+        text,
+        attachments = []
+    ) {
         hideWelcome();
 
         const article = document.createElement(
@@ -436,6 +934,11 @@
         );
 
         content.textContent = text;
+
+        appendMessageAttachments(
+            inner,
+            attachments
+        );
 
         inner.appendChild(
             content
@@ -1281,6 +1784,13 @@
             return;
         }
 
+        if (
+            pendingAttachments.length
+            && conversationId !== currentConversationId
+        ) {
+            discardPendingAttachments();
+        }
+
         try {
             const data = await requestJson(
                 (
@@ -1313,7 +1823,9 @@
                         === "user"
                     ) {
                         createUserMessage(
-                            message.content
+                            message.content,
+                            message.attachments
+                            || []
                         );
 
                     } else {
@@ -1358,6 +1870,10 @@
     function startNewChat() {
         if (generating) {
             return;
+        }
+
+        if (pendingAttachments.length) {
+            discardPendingAttachments();
         }
 
         currentConversationId = null;
@@ -1510,7 +2026,10 @@
     }
 
 
-    async function sendMessage(text) {
+    async function sendMessage(
+        text,
+        attachments = []
+    ) {
         if (
             generating
             || !text.trim()
@@ -1521,7 +2040,8 @@
         generating = true;
 
         createUserMessage(
-            text
+            text,
+            attachments
         );
 
         const assistant = (
@@ -1558,6 +2078,13 @@
 
                         model_mode:
                             modelSelect.value,
+
+                        attachment_ids:
+                            attachments.map(
+                                (attachment) => (
+                                    attachment.id
+                                )
+                            ),
                     }),
 
                     signal:
@@ -1800,15 +2327,35 @@
                 input.value.trim()
             );
 
-            if (!text) {
+            if (attachmentUploadActive) {
+                showNotice(
+                    "Please wait for the attachment upload to finish."
+                );
                 return;
             }
+
+            if (!text) {
+                if (pendingAttachments.length) {
+                    showNotice(
+                        "Add a message with the attachment for now."
+                    );
+                }
+                return;
+            }
+
+            const attachments = [
+                ...pendingAttachments
+            ];
+
+            pendingAttachments = [];
+            renderPendingAttachments();
 
             input.value = "";
             autoResizeInput();
 
             sendMessage(
-                text
+                text,
+                attachments
             );
         }
     );
@@ -1966,8 +2513,29 @@
     attachmentButton.addEventListener(
         "click",
         () => {
-            showNotice(
-                "Attachment UI is ready. Vision/document processing will be connected next."
+            if (
+                generating
+                || attachmentUploadActive
+            ) {
+                return;
+            }
+
+            attachmentInput.click();
+        }
+    );
+
+
+    attachmentInput.addEventListener(
+        "change",
+        async () => {
+            const files = Array.from(
+                attachmentInput.files || []
+            );
+
+            attachmentInput.value = "";
+
+            await uploadFiles(
+                files
             );
         }
     );

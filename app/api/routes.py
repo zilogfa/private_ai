@@ -5,6 +5,7 @@ from flask import (
     Response,
     jsonify,
     request,
+    send_file,
     stream_with_context,
 )
 
@@ -26,9 +27,19 @@ from app.database import (
     get_user_roles,
     get_user_settings,
     list_conversations,
-    load_messages,
+    load_message_records,
     update_conversation_title,
     update_user_settings,
+)
+
+from app.services.attachments import (
+    cleanup_conversation_files,
+    create_attachment,
+    delete_pending_attachment,
+    get_attachment_path,
+    get_attachments_by_ids,
+    list_attachments_for_conversation,
+    public_attachment_data,
 )
 
 from app.services.chat import (
@@ -259,7 +270,7 @@ def remove_conversation(
         get_current_user_id()
     )
 
-    if not delete_conversation(
+    if not conversation_belongs_to_user(
         conversation_id,
         user_id,
     ):
@@ -269,6 +280,23 @@ def remove_conversation(
                     "conversation_not_found"
             }),
             404,
+        )
+
+    cleanup_conversation_files(
+        user_id,
+        conversation_id,
+    )
+
+    if not delete_conversation(
+        conversation_id,
+        user_id,
+    ):
+        return (
+            jsonify({
+                "error":
+                    "conversation_delete_failed"
+            }),
+            500,
         )
 
     return jsonify({
@@ -302,19 +330,43 @@ def conversation_messages(
             404,
         )
 
-    messages = load_messages(
+    messages = load_message_records(
         conversation_id,
         user_id,
+        after_id=0,
+    )
+
+    attachments_by_message = (
+        list_attachments_for_conversation(
+            user_id,
+            conversation_id,
+        )
     )
 
     rendered_messages = []
 
     for message in messages:
+        message_attachments = [
+            public_attachment_data(
+                attachment
+            )
+            for attachment in (
+                attachments_by_message.get(
+                    message["id"],
+                    [],
+                )
+            )
+        ]
+
         item = {
+            "id":
+                message["id"],
             "role":
                 message["role"],
             "content":
                 message["content"],
+            "attachments":
+                message_attachments,
         }
 
         if (
@@ -337,6 +389,162 @@ def conversation_messages(
         "messages":
             rendered_messages,
     })
+
+
+# =========================================================
+# ATTACHMENTS
+# =========================================================
+
+@api_bp.post("/attachments")
+@permission_required("chat.use")
+def upload_attachment():
+    user_id = (
+        get_current_user_id()
+    )
+
+    file_storage = (
+        request.files.get("file")
+    )
+
+    if not file_storage:
+        return (
+            jsonify({
+                "error": "file_required"
+            }),
+            400,
+        )
+
+    conversation_id = (
+        request.form.get(
+            "conversation_id"
+        )
+    )
+
+    if conversation_id:
+        try:
+            conversation_id = int(
+                conversation_id
+            )
+
+        except (ValueError, TypeError):
+            return (
+                jsonify({
+                    "error":
+                        "invalid_conversation"
+                }),
+                400,
+            )
+
+        if not conversation_belongs_to_user(
+            conversation_id,
+            user_id,
+        ):
+            return (
+                jsonify({
+                    "error":
+                        "conversation_not_found"
+                }),
+                404,
+            )
+
+    else:
+        conversation_id = None
+
+    try:
+        attachment = create_attachment(
+            user_id=
+                user_id,
+            file_storage=
+                file_storage,
+            conversation_id=
+                conversation_id,
+        )
+
+    except ValueError as error:
+        return (
+            jsonify({
+                "error": str(error)
+            }),
+            400,
+        )
+
+    return (
+        jsonify({
+            "attachment":
+                public_attachment_data(
+                    attachment
+                )
+        }),
+        201,
+    )
+
+
+@api_bp.delete(
+    "/attachments/<attachment_id>"
+)
+@permission_required("chat.use")
+def remove_pending_attachment(
+    attachment_id,
+):
+    deleted = delete_pending_attachment(
+        attachment_id,
+        get_current_user_id(),
+    )
+
+    if not deleted:
+        return (
+            jsonify({
+                "error":
+                    "attachment_not_found_or_in_use"
+            }),
+            404,
+        )
+
+    return jsonify({
+        "deleted": True,
+        "attachment_id":
+            attachment_id,
+    })
+
+
+@api_bp.get(
+    "/attachments/<attachment_id>/content"
+)
+@permission_required("chat.use")
+def attachment_content(
+    attachment_id,
+):
+    attachment, path = (
+        get_attachment_path(
+            attachment_id,
+            get_current_user_id(),
+        )
+    )
+
+    if not attachment or not path:
+        return (
+            jsonify({
+                "error":
+                    "attachment_not_found"
+            }),
+            404,
+        )
+
+    response = send_file(
+        path,
+        mimetype=
+            attachment["mime_type"],
+        download_name=
+            attachment["original_name"],
+        as_attachment=False,
+        conditional=True,
+    )
+
+    response.headers[
+        "Cache-Control"
+    ] = "private, max-age=3600"
+
+    return response
 
 
 # =========================================================
@@ -508,6 +716,26 @@ def chat_stream_api():
             400,
         )
 
+    attachment_ids = (
+        payload.get(
+            "attachment_ids",
+            [],
+        )
+        or []
+    )
+
+    if not isinstance(
+        attachment_ids,
+        list,
+    ):
+        return (
+            jsonify({
+                "error":
+                    "invalid_attachment_ids"
+            }),
+            400,
+        )
+
     conversation_id = (
         payload.get(
             "conversation_id"
@@ -550,6 +778,22 @@ def chat_stream_api():
                 }),
                 404,
             )
+
+    try:
+        attachments = get_attachments_by_ids(
+            user_id,
+            attachment_ids,
+            conversation_id=
+                conversation_id,
+        )
+
+    except ValueError as error:
+        return (
+            jsonify({
+                "error": str(error)
+            }),
+            400,
+        )
 
     user_settings = (
         get_user_settings(
@@ -609,6 +853,8 @@ def chat_stream_api():
                 model_mode,
             include_thinking=
                 include_thinking,
+            attachments=
+                attachments,
         ):
             yield _ndjson(
                 event

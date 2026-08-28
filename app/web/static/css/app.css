@@ -719,7 +719,8 @@ a {
 
 .user-message .message-inner {
     display: flex;
-    justify-content: flex-end;
+    flex-direction: column;
+    align-items: flex-end;
 }
 
 .message-text {
@@ -741,6 +742,75 @@ a {
 
 .assistant-message .message-text {
     padding: 3px 0;
+}
+
+.message-attachments {
+    width: min(78%, 650px);
+    margin-bottom: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.attachment-card {
+    width: min(100%, 300px);
+    min-width: 210px;
+    min-height: 62px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--panel);
+    color: var(--text);
+    text-decoration: none;
+    overflow: hidden;
+}
+
+.attachment-card:hover {
+    background: var(--panel-strong);
+}
+
+.attachment-visual {
+    width: 46px;
+    height: 46px;
+    flex: 0 0 46px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    border-radius: 10px;
+    background: var(--panel-strong);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.attachment-visual img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
+
+.attachment-meta {
+    min-width: 0;
+    flex: 1;
+    display: grid;
+    gap: 3px;
+}
+
+.attachment-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+}
+
+.attachment-meta small {
+    color: var(--muted);
+    font-size: 11px;
 }
 
 
@@ -1130,6 +1200,45 @@ a {
         );
 }
 
+.pending-attachments {
+    width: min(100%, 820px);
+    margin: 0 auto 8px;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 2px 1px;
+    scrollbar-width: thin;
+}
+
+.pending-attachment-card {
+    position: relative;
+    width: 250px;
+    min-width: 220px;
+    padding-right: 38px;
+    background: var(--panel);
+}
+
+.attachment-remove-button {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: var(--panel-strong);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+}
+
+.attachment-remove-button:hover {
+    color: var(--text);
+}
+
 .composer {
     width: min(100%, 820px);
     margin: 0 auto;
@@ -1431,8 +1540,18 @@ td small {
             28px;
     }
 
-    .user-message .message-text {
-        max-width: 88%;
+    .user-message .message-text,
+    .message-attachments {
+        max-width: 92%;
+        width: auto;
+    }
+
+    .attachment-card {
+        min-width: min(260px, 78vw);
+    }
+
+    .pending-attachment-card {
+        min-width: min(235px, 76vw);
     }
 
     .composer-wrap {
