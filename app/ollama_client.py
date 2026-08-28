@@ -31,6 +31,55 @@ class OllamaResponseError(OllamaError):
 
 
 # =========================================================
+# HTTP ERROR DETAILS
+# =========================================================
+
+def _ollama_http_error(
+    response,
+):
+    """
+    Build a useful local error without dumping an entire response body.
+    Ollama normally returns JSON such as:
+        {"error": "request (...) exceeds ..."}
+    """
+
+    detail = None
+
+    try:
+        data = response.json()
+
+        if isinstance(data, dict):
+            detail = data.get(
+                "error"
+            )
+
+    except ValueError:
+        detail = None
+
+    if not detail:
+        text = (
+            response.text
+            or ""
+        ).strip()
+
+        if text:
+            detail = text[:500]
+
+    if detail:
+        return (
+            f"Ollama HTTP "
+            f"{response.status_code}: "
+            f"{detail}"
+        )
+
+    return (
+        f"Ollama HTTP "
+        f"{response.status_code}: "
+        f"{response.reason}"
+    )
+
+
+# =========================================================
 # NON-STREAMING CHAT
 # =========================================================
 
@@ -60,12 +109,20 @@ def chat_once(
             timeout=timeout,
         )
 
-        response.raise_for_status()
+        if not response.ok:
+            raise OllamaRequestError(
+                _ollama_http_error(
+                    response
+                )
+            )
 
     except requests.exceptions.ConnectionError as error:
         raise OllamaConnectionError(
             "Could not connect to Ollama."
         ) from error
+
+    except OllamaRequestError:
+        raise
 
     except requests.exceptions.RequestException as error:
         raise OllamaRequestError(
@@ -108,7 +165,12 @@ def chat_stream(
             timeout=timeout,
         ) as response:
 
-            response.raise_for_status()
+            if not response.ok:
+                raise OllamaRequestError(
+                    _ollama_http_error(
+                        response
+                    )
+                )
 
             for line in response.iter_lines():
 
@@ -130,6 +192,9 @@ def chat_stream(
         raise OllamaConnectionError(
             "Could not connect to Ollama."
         ) from error
+
+    except OllamaRequestError:
+        raise
 
     except requests.exceptions.RequestException as error:
         raise OllamaRequestError(

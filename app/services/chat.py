@@ -32,6 +32,15 @@ from app.services.attachments import (
     build_unprocessed_attachment_note,
 )
 
+from app.services.vision import (
+    SHOW_VISION_ACTIVITY,
+    VISION_MODEL,
+    VisionPreparationError,
+    build_vision_messages,
+    list_image_attachments,
+    stream_vision_chat,
+)
+
 
 # =========================================================
 # SYSTEM PROMPT
@@ -169,8 +178,7 @@ def stream_chat(
     Terminal requests may leave it as None.
 
     attachments contains already validated attachment
-    metadata. v1.0 stores and associates files, but does
-    not inspect file contents yet.
+    metadata.
 
     Standard event families:
         status
@@ -180,14 +188,23 @@ def stream_chat(
         response_complete
         done
         error
-
-    Future capabilities such as vision, search, speech,
-    and image generation can reuse the same event pattern.
     """
 
     attachments = list(
         attachments or []
     )
+
+    image_attachments = (
+        list_image_attachments(
+            attachments
+        )
+    )
+
+    non_image_attachments = [
+        attachment
+        for attachment in attachments
+        if attachment.get("kind") != "image"
+    ]
 
     yield {
         "type": "status",
@@ -242,7 +259,7 @@ def stream_chat(
 
     attachment_note = (
         build_unprocessed_attachment_note(
-            attachments
+            non_image_attachments
         )
     )
 
@@ -270,12 +287,21 @@ def stream_chat(
         "label": "Routing...",
     }
 
-    selected_mode, selected_model = (
-        route_model(
-            user_message,
-            mode=model_mode,
-        )
+    using_vision = bool(
+        image_attachments
     )
+
+    if using_vision:
+        selected_mode = "vision"
+        selected_model = VISION_MODEL
+
+    else:
+        selected_mode, selected_model = (
+            route_model(
+                user_message,
+                mode=model_mode,
+            )
+        )
 
     yield {
         "type": "route",
@@ -283,11 +309,55 @@ def stream_chat(
         "model": selected_model,
     }
 
-    yield {
-        "type": "status",
-        "status": "generating",
-        "label": "Generating...",
-    }
+    if using_vision:
+        if SHOW_VISION_ACTIVITY:
+            yield {
+                "type": "status",
+                "status": "analyzing_image",
+                "label": "Analyzing image...",
+            }
+
+        try:
+            model_messages = (
+                build_vision_messages(
+                    base_messages=
+                        messages,
+                    image_attachments=
+                        image_attachments,
+                    other_attachments=
+                        non_image_attachments,
+                )
+            )
+
+        except VisionPreparationError as error:
+            yield {
+                "type": "error",
+                "kind": "vision_prepare",
+                "message": str(error),
+            }
+            return
+
+        generation_stream = (
+            stream_vision_chat(
+                model_messages,
+                timeout=900,
+            )
+        )
+
+    else:
+        yield {
+            "type": "status",
+            "status": "generating",
+            "label": "Generating...",
+        }
+
+        generation_stream = (
+            chat_stream(
+                model=selected_model,
+                messages=messages,
+                timeout=600,
+            )
+        )
 
     # -----------------------------------------------------
     # Generate response
@@ -300,11 +370,7 @@ def stream_chat(
     content_started = False
 
     try:
-        for data in chat_stream(
-            model=selected_model,
-            messages=messages,
-            timeout=600,
-        ):
+        for data in generation_stream:
             message_data = data.get(
                 "message",
                 {},
