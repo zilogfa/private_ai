@@ -262,24 +262,67 @@ def _encode_image_attachment(
 
 def build_vision_messages(
     base_messages,
-    image_attachments,
+    image_attachments=None,
     other_attachments=None,
+    extra_images=None,
+    additional_context=None,
 ):
     images = list(
         image_attachments or []
-    )[:MAX_VISION_IMAGES]
+    )
 
-    if not images:
-        raise VisionPreparationError(
-            "No image attachments were provided."
+    extra_images = list(
+        extra_images or []
+    )
+
+    visual_sources = []
+
+    for attachment in images:
+        visual_sources.append({
+            "kind": "attachment",
+            "name": attachment.get(
+                "original_name",
+                "image",
+            ),
+            "attachment": attachment,
+        })
+
+    for item in extra_images:
+        data = item.get(
+            "data"
         )
+
+        if not data:
+            continue
+
+        visual_sources.append({
+            "kind": "bytes",
+            "name": item.get(
+                "name",
+                "document page",
+            ),
+            "data": data,
+        })
+
+    visual_sources = visual_sources[
+        :MAX_VISION_IMAGES
+    ]
+
+    if not visual_sources:
+        raise VisionPreparationError(
+            "No visual attachments were provided."
+        )
+
+    visual_count = len(
+        visual_sources
+    )
 
     # Reduce per-image dimensions when several images are sent in one
     # request so the combined visual-token load remains reasonable.
-    if len(images) == 1:
+    if visual_count == 1:
         image_edge = MAX_VISION_EDGE
 
-    elif len(images) == 2:
+    elif visual_count == 2:
         image_edge = min(
             MAX_VISION_EDGE,
             1280,
@@ -291,13 +334,28 @@ def build_vision_messages(
             1024,
         )
 
-    encoded_images = [
-        _encode_image_attachment(
-            attachment,
-            max_edge=image_edge,
+    encoded_images = []
+    image_names = []
+
+    for source in visual_sources:
+        image_names.append(
+            source["name"]
         )
-        for attachment in images
-    ]
+
+        if source["kind"] == "attachment":
+            encoded = _encode_image_attachment(
+                source["attachment"],
+                max_edge=image_edge,
+            )
+
+        else:
+            encoded = base64.b64encode(
+                source["data"]
+            ).decode("utf-8")
+
+        encoded_images.append(
+            encoded
+        )
 
     other_attachments = list(
         other_attachments or []
@@ -333,12 +391,18 @@ def build_vision_messages(
             "Could not locate the latest user message."
         )
 
-    image_names = ", ".join(
-        attachment[
-            "original_name"
-        ]
-        for attachment in images
-    )
+    if additional_context:
+        messages.insert(
+            last_user_index,
+            {
+                "role": "system",
+                "content": str(
+                    additional_context
+                ),
+            },
+        )
+
+        last_user_index += 1
 
     user_message = dict(
         messages[last_user_index]
@@ -354,12 +418,12 @@ def build_vision_messages(
     instruction_lines = [
         original_text,
         "",
-        "Current attached image file(s):",
-        image_names,
+        "Current visual source(s):",
+        ", ".join(image_names),
         "",
-        "Use the attached image(s) as visual context when answering.",
-        "If text in an image is unclear, say so.",
-        "If multiple images matter, mention the file names when useful.",
+        "Use the visual source(s) as context when answering.",
+        "If text or visual detail is unclear, say so.",
+        "If multiple visuals matter, mention their file/page names when useful.",
     ]
 
     if other_attachments:
@@ -372,9 +436,9 @@ def build_vision_messages(
 
         instruction_lines.extend([
             "",
-            "Non-image attachments are also present but are not yet analyzed in this version:",
+            "The following attachment(s) could not be processed in the current request:",
             other_names,
-            "Do not claim to have read those non-image files yet.",
+            "Do not claim to have read their contents.",
         ])
 
     user_message["content"] = "\n".join(

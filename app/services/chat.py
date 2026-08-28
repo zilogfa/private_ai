@@ -29,10 +29,20 @@ from app.sessions import (
 
 from app.services.attachments import (
     bind_attachments_to_message,
-    build_unprocessed_attachment_note,
+)
+
+from app.services.documents import (
+    DOCUMENT_CONTEXT_SIZE,
+    DOCUMENT_TEXT_BUDGET,
+    SHOW_DOCUMENT_ACTIVITY,
+    VISION_DOCUMENT_TEXT_BUDGET,
+    build_document_context,
+    list_document_attachments,
+    prepare_document_attachments,
 )
 
 from app.services.vision import (
+    MAX_VISION_IMAGES,
     SHOW_VISION_ACTIVITY,
     VISION_MODEL,
     VisionPreparationError,
@@ -160,6 +170,44 @@ def build_chat_context(
 
 
 # =========================================================
+# DOCUMENT CONTEXT INSERTION
+# =========================================================
+
+def _insert_context_before_latest_user(
+    messages,
+    context,
+):
+    if not context:
+        return messages
+
+    insert_at = len(messages)
+
+    for index in range(
+        len(messages) - 1,
+        -1,
+        -1,
+    ):
+        if (
+            messages[index].get(
+                "role"
+            )
+            == "user"
+        ):
+            insert_at = index
+            break
+
+    messages.insert(
+        insert_at,
+        {
+            "role": "system",
+            "content": context,
+        },
+    )
+
+    return messages
+
+
+# =========================================================
 # STREAM CHAT
 # =========================================================
 
@@ -177,8 +225,11 @@ def stream_chat(
     Web requests should pass model_mode explicitly.
     Terminal requests may leave it as None.
 
-    attachments contains already validated attachment
-    metadata.
+    Current attachment routing:
+        image -> local VLM
+        DOCX/TXT/MD/CSV/JSON -> local text extraction
+        text PDF -> local text extraction
+        scanned/low-text PDF pages -> local VLM
 
     Standard event families:
         status
@@ -200,11 +251,11 @@ def stream_chat(
         )
     )
 
-    non_image_attachments = [
-        attachment
-        for attachment in attachments
-        if attachment.get("kind") != "image"
-    ]
+    document_attachments = (
+        list_document_attachments(
+            attachments
+        )
+    )
 
     yield {
         "type": "status",
@@ -213,7 +264,7 @@ def stream_chat(
     }
 
     # -----------------------------------------------------
-    # Save user message
+    # Save user message / bind attachments
     # -----------------------------------------------------
 
     user_message_id = save_message(
@@ -248,7 +299,7 @@ def stream_chat(
     )
 
     # -----------------------------------------------------
-    # Build context
+    # Build text/memory context
     # -----------------------------------------------------
 
     messages = build_chat_context(
@@ -257,24 +308,63 @@ def stream_chat(
         user_message,
     )
 
-    attachment_note = (
-        build_unprocessed_attachment_note(
-            non_image_attachments
+    # -----------------------------------------------------
+    # Document extraction / scanned PDF rendering
+    # -----------------------------------------------------
+
+    document_result = None
+
+    if document_attachments:
+        if SHOW_DOCUMENT_ACTIVITY:
+            yield {
+                "type": "status",
+                "status": "reading_document",
+                "label": "Reading document...",
+            }
+
+        remaining_visual_slots = max(
+            0,
+            MAX_VISION_IMAGES
+            - len(image_attachments),
+        )
+
+        document_result = (
+            prepare_document_attachments(
+                document_attachments,
+                max_vision_pages=
+                    remaining_visual_slots,
+            )
+        )
+
+    document_vision_images = (
+        list(
+            (
+                document_result
+                or {}
+            ).get(
+                "vision_images",
+                [],
+            )
         )
     )
 
-    if attachment_note:
-        insert_at = max(
-            len(messages) - 1,
-            1,
-        )
+    using_vision = bool(
+        image_attachments
+        or document_vision_images
+    )
 
-        messages.insert(
-            insert_at,
-            {
-                "role": "system",
-                "content": attachment_note,
-            },
+    document_context = None
+
+    if document_result:
+        document_context = (
+            build_document_context(
+                document_result,
+                max_chars=(
+                    VISION_DOCUMENT_TEXT_BUDGET
+                    if using_vision
+                    else DOCUMENT_TEXT_BUDGET
+                ),
+            )
         )
 
     # -----------------------------------------------------
@@ -286,10 +376,6 @@ def stream_chat(
         "status": "routing",
         "label": "Routing...",
     }
-
-    using_vision = bool(
-        image_attachments
-    )
 
     if using_vision:
         selected_mode = "vision"
@@ -309,12 +395,34 @@ def stream_chat(
         "model": selected_model,
     }
 
+    # -----------------------------------------------------
+    # Prepare generation stream
+    # -----------------------------------------------------
+
     if using_vision:
         if SHOW_VISION_ACTIVITY:
+            if (
+                document_vision_images
+                and image_attachments
+            ):
+                vision_label = (
+                    "Analyzing images and document pages..."
+                )
+
+            elif document_vision_images:
+                vision_label = (
+                    "Analyzing document pages..."
+                )
+
+            else:
+                vision_label = (
+                    "Analyzing image..."
+                )
+
             yield {
                 "type": "status",
-                "status": "analyzing_image",
-                "label": "Analyzing image...",
+                "status": "analyzing_visuals",
+                "label": vision_label,
             }
 
         try:
@@ -324,8 +432,19 @@ def stream_chat(
                         messages,
                     image_attachments=
                         image_attachments,
-                    other_attachments=
-                        non_image_attachments,
+                    other_attachments=(
+                        (
+                            document_result
+                            or {}
+                        ).get(
+                            "unprocessed_attachments",
+                            [],
+                        )
+                    ),
+                    extra_images=
+                        document_vision_images,
+                    additional_context=
+                        document_context,
                 )
             )
 
@@ -345,17 +464,34 @@ def stream_chat(
         )
 
     else:
+        if document_context:
+            messages = (
+                _insert_context_before_latest_user(
+                    messages,
+                    document_context,
+                )
+            )
+
         yield {
             "type": "status",
             "status": "generating",
             "label": "Generating...",
         }
 
+        options = None
+
+        if document_attachments:
+            options = {
+                "num_ctx":
+                    DOCUMENT_CONTEXT_SIZE,
+            }
+
         generation_stream = (
             chat_stream(
                 model=selected_model,
                 messages=messages,
-                timeout=600,
+                options=options,
+                timeout=900,
             )
         )
 
