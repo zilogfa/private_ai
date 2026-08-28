@@ -1,5 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html
+    lang="en"
+    data-accent-color="{% block accent_color %}{% endblock %}"
+>
 <head>
     <meta charset="utf-8">
     <meta
@@ -13,6 +16,9 @@
     <title>
         {% block title %}Private AI{% endblock %}
     </title>
+    <script
+        src="{{ url_for('static', filename='js/theme.js') }}"
+    ></script>
     <link
         rel="stylesheet"
         href="{{ url_for('static', filename='css/app.css') }}"

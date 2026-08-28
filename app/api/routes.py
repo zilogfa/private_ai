@@ -44,6 +44,11 @@ from app.services.markdown import (
     render_markdown,
 )
 
+from app.ui_preferences import (
+    merge_accent_setting,
+    normalize_accent_color,
+)
+
 
 api_bp = Blueprint(
     "api",
@@ -420,6 +425,38 @@ def save_settings():
             )
 
         kwargs["theme"] = theme
+
+    if "accent_color" in payload:
+        accent_color = (
+            normalize_accent_color(
+                payload.get(
+                    "accent_color"
+                )
+            )
+        )
+
+        if not accent_color:
+            return (
+                jsonify({
+                    "error":
+                        "invalid_accent_color"
+                }),
+                400,
+            )
+
+        current_settings = (
+            get_user_settings(
+                user_id
+            )
+            or {}
+        )
+
+        kwargs["extra"] = (
+            merge_accent_setting(
+                current_settings,
+                accent_color,
+            )
+        )
 
     if kwargs:
         update_user_settings(

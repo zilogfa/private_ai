@@ -110,13 +110,13 @@ SHOW_SUMMARY_ACTIVITY = True
 
 WEB_HOST = os.environ.get(
     "PRIVATE_AI_HOST",
-    "127.0.0.1",
+    "0.0.0.0",
 )
 
 WEB_PORT = int(
     os.environ.get(
         "PRIVATE_AI_PORT",
-        "5000",
+        "5050",
     )
 )
 

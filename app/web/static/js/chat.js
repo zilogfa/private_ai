@@ -113,6 +113,25 @@
         || "auto"
     );
 
+    const ACTIVITY_LABELS = {
+        preparing: "Preparing...",
+        routing: "Routing...",
+        generating: "Generating...",
+        thinking: "Thinking...",
+        responding: "Responding...",
+        formatting: "Formatting...",
+        naming: "Naming chat...",
+        memory: "Updating memory...",
+        searching: "Searching web...",
+        reading: "Reading sources...",
+        analyzing_image: "Analyzing image...",
+        generating_image: "Generating image...",
+        uploading: "Uploading...",
+        transcribing: "Transcribing...",
+        speaking: "Speaking...",
+        working: "Working...",
+    };
+
 
     // =====================================================
     // UTILITIES
@@ -122,6 +141,32 @@
         return window.matchMedia(
             "(max-width: 760px)"
         ).matches;
+    }
+
+
+    function syncViewportHeight() {
+        if (!isMobile()) {
+            document.documentElement
+            .style.removeProperty(
+                "--app-height"
+            );
+
+            return;
+        }
+
+        const viewportHeight = (
+            window.visualViewport
+            ?.height
+            || window.innerHeight
+        );
+
+        document.documentElement
+        .style.setProperty(
+            "--app-height",
+            `${Math.round(
+                viewportHeight
+            )}px`
+        );
     }
 
 
@@ -491,41 +536,80 @@
             + "streaming-plain"
         );
 
-        const status = document.createElement(
+        const activity = document.createElement(
             "div"
         );
 
-        status.className = (
-            "status-row"
+        activity.className = (
+            "activity-row"
         );
 
-        const statusDot = document.createElement(
-            "span"
+        activity.dataset.phase = (
+            "preparing"
         );
 
-        statusDot.className = (
-            "status-dot"
-        );
-
-        const statusLabel =
+        const activityIndicator =
             document.createElement(
                 "span"
             );
 
-        statusLabel.textContent = (
-            "Preparing..."
+        activityIndicator.className = (
+            "activity-indicator"
         );
 
-        status.append(
-            statusDot,
-            statusLabel
+        activityIndicator.setAttribute(
+            "aria-hidden",
+            "true"
+        );
+
+        const activityText =
+            document.createElement(
+                "span"
+            );
+
+        activityText.className = (
+            "activity-text"
+        );
+
+        const activityLabel =
+            document.createElement(
+                "span"
+            );
+
+        activityLabel.className = (
+            "activity-label"
+        );
+
+        activityLabel.textContent = (
+            ACTIVITY_LABELS.preparing
+        );
+
+        const activityDetail =
+            document.createElement(
+                "span"
+            );
+
+        activityDetail.className = (
+            "activity-detail"
+        );
+
+        activityDetail.hidden = true;
+
+        activityText.append(
+            activityLabel,
+            activityDetail
+        );
+
+        activity.append(
+            activityIndicator,
+            activityText
         );
 
         inner.append(
             meta,
             thinking,
             content,
-            status
+            activity
         );
 
         article.appendChild(
@@ -542,10 +626,12 @@
             article,
             modelTag,
             thinking,
+            thinkingSummary: summary,
             thinkingContent,
             content,
-            status,
-            statusLabel,
+            activity,
+            activityLabel,
+            activityDetail,
         };
     }
 
@@ -586,24 +672,122 @@
     }
 
 
-    function setStatus(
+    function setActivity(
         assistant,
-        label
+        phase = "working",
+        label = null,
+        detail = null
     ) {
-        assistant.status.hidden = false;
-
-        assistant.statusLabel.textContent = (
-            label
+        const safePhase = (
+            String(
+                phase
+                || "working"
+            )
+            .trim()
+            .toLowerCase()
+            || "working"
         );
 
+        assistant.activity.hidden = false;
+
+        assistant.activity.dataset.phase = (
+            safePhase
+        );
+
+        assistant.activityLabel.textContent = (
+            label
+            || ACTIVITY_LABELS[safePhase]
+            || ACTIVITY_LABELS.working
+        );
+
+        if (detail) {
+            assistant.activityDetail.textContent = (
+                String(detail)
+            );
+
+            assistant.activityDetail.hidden = false;
+
+        } else {
+            assistant.activityDetail.textContent = "";
+            assistant.activityDetail.hidden = true;
+        }
+
+        if (
+            safePhase !== "thinking"
+            && !assistant.thinking.hidden
+        ) {
+            assistant.thinkingSummary.textContent = (
+                "Thinking"
+            );
+        }
+
         scrollToBottom();
+    }
+
+
+    function finishActivity(
+        assistant
+    ) {
+        assistant.activity.hidden = true;
+
+        if (!assistant.thinking.hidden) {
+            assistant.thinkingSummary.textContent = (
+                "Thinking"
+            );
+        }
+    }
+
+
+    function handleActivityEvent(
+        event,
+        assistant
+    ) {
+        const state = String(
+            event.state
+            || "update"
+        ).toLowerCase();
+
+        if (
+            state === "end"
+            || state === "done"
+        ) {
+            finishActivity(
+                assistant
+            );
+
+            return;
+        }
+
+        setActivity(
+            assistant,
+            event.phase
+            || event.status
+            || "working",
+            event.label,
+            event.detail
+        );
+    }
+
+
+    function setStatus(
+        assistant,
+        label,
+        phase = "working"
+    ) {
+        setActivity(
+            assistant,
+            phase,
+            label
+        );
     }
 
 
     function finishStatus(
         assistant
     ) {
-        assistant.status.hidden = true;
+        finishActivity(
+            assistant
+        );
     }
 
 
@@ -1218,10 +1402,19 @@
                 break;
 
             case "status":
-                setStatus(
+                setActivity(
                     assistant,
+                    event.status
+                    || "working",
                     event.label
-                    || "Working..."
+                );
+
+                break;
+
+            case "activity":
+                handleActivityEvent(
+                    event,
+                    assistant
                 );
 
                 break;
@@ -1239,6 +1432,10 @@
 
             case "thinking":
                 assistant.thinking.hidden = false;
+
+                assistant.thinkingSummary.textContent = (
+                    "Thinking..."
+                );
 
                 assistant.thinkingContent.textContent += (
                     event.content
@@ -1262,7 +1459,8 @@
             case "response_complete":
                 setStatus(
                     assistant,
-                    "Formatting..."
+                    "Formatting...",
+                    "formatting"
                 );
 
                 break;
@@ -1743,11 +1941,26 @@
     window.addEventListener(
         "resize",
         () => {
+            syncViewportHeight();
+
             if (!isMobile()) {
                 closeMobileSidebar();
             }
         }
     );
+
+
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener(
+            "resize",
+            syncViewportHeight
+        );
+
+        window.visualViewport.addEventListener(
+            "scroll",
+            syncViewportHeight
+        );
+    }
 
 
     attachmentButton.addEventListener(
@@ -1803,6 +2016,8 @@
     // =====================================================
     // START
     // =====================================================
+
+    syncViewportHeight();
 
     applySidebarPreferences();
 

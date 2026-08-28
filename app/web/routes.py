@@ -33,6 +33,11 @@ from app.database import (
     user_has_permission,
 )
 
+from app.ui_preferences import (
+    merge_accent_setting,
+    resolve_accent_choice,
+)
+
 
 web_bp = Blueprint(
     "web",
@@ -281,6 +286,13 @@ def profile():
 
     user = get_current_user()
 
+    current_settings = (
+        get_user_settings(
+            user_id
+        )
+        or {}
+    )
+
     if request.method == "POST":
         display_name = (
             request.form.get(
@@ -322,6 +334,18 @@ def profile():
             == "on"
         )
 
+        accent_color = (
+            resolve_accent_choice(
+                request.form.get(
+                    "accent_choice",
+                    "default",
+                ),
+                request.form.get(
+                    "accent_custom",
+                ),
+            )
+        )
+
         if model_mode not in VALID_MODEL_MODES:
             flash(
                 "Invalid model mode.",
@@ -338,12 +362,25 @@ def profile():
                 "error",
             )
 
+        elif not accent_color:
+            flash(
+                "Invalid accent color.",
+                "error",
+            )
+
         else:
             if display_name:
                 update_user_profile(
                     user_id,
                     display_name,
                 )
+
+            extra_settings = (
+                merge_accent_setting(
+                    current_settings,
+                    accent_color,
+                )
+            )
 
             update_user_settings(
                 user_id,
@@ -355,6 +392,8 @@ def profile():
                     theme,
                 tts_enabled=
                     tts_enabled,
+                extra=
+                    extra_settings,
             )
 
             flash(

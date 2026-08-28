@@ -2,6 +2,7 @@
 
 {% block title %}Profile · Private AI{% endblock %}
 {% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
 
 {% block content %}
 <main class="settings-page">
@@ -28,7 +29,7 @@
     </div>
 
     <section class="settings-card">
-        <form method="post" class="form-stack">
+        <form method="post" class="form-stack" data-accent-form>
             <input
                 type="hidden"
                 name="_csrf_token"
@@ -71,6 +72,63 @@
                     </option>
                     {% endfor %}
                 </select>
+            </label>
+
+            {% set accent_color = settings.get('extra', {}).get('accent_color', 'default') %}
+            {% set accent_presets = [
+                ('#2563eb', 'Blue'),
+                ('#7c3aed', 'Purple'),
+                ('#0f766e', 'Teal'),
+                ('#c2410c', 'Orange'),
+                ('#be123c', 'Rose')
+            ] %}
+            {% set preset_values = ['#2563eb', '#7c3aed', '#0f766e', '#c2410c', '#be123c'] %}
+
+            <label>
+                UI accent color
+                <select
+                    name="accent_choice"
+                    data-accent-select
+                >
+                    <option
+                        value="default"
+                        {% if accent_color == 'default' %}selected{% endif %}
+                    >
+                        Default
+                    </option>
+
+                    {% for value, label in accent_presets %}
+                    <option
+                        value="{{ value }}"
+                        {% if accent_color == value %}selected{% endif %}
+                    >
+                        {{ label }}
+                    </option>
+                    {% endfor %}
+
+                    <option
+                        value="custom"
+                        {% if accent_color != 'default' and accent_color not in preset_values %}selected{% endif %}
+                    >
+                        Custom
+                    </option>
+                </select>
+            </label>
+
+            <label class="accent-custom-row">
+                Custom color
+                <span class="accent-custom-control">
+                    <input
+                        type="color"
+                        name="accent_custom"
+                        value="{{ accent_color if accent_color != 'default' else '#2563eb' }}"
+                        data-accent-custom
+                        aria-label="Custom UI accent color"
+                    >
+                    <small>
+                        Pick any color, then save settings.
+                    </small>
+                </span>
             </label>
 
             <label class="check-row">
