@@ -150,12 +150,20 @@ def create_app():
         api_bp,
     )
 
+    from app.api.speech_routes import (
+        speech_api_bp,
+    )
+
     app.register_blueprint(
         web_bp
     )
 
     app.register_blueprint(
         api_bp
+    )
+
+    app.register_blueprint(
+        speech_api_bp
     )
 
     @app.after_request

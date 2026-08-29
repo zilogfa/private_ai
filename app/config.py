@@ -164,6 +164,51 @@ if DEFAULT_WEB_MODE not in VALID_WEB_MODES:
 
 
 # =========================================================
+# SPEECH
+# =========================================================
+
+STT_PROVIDER = os.environ.get(
+    "PRIVATE_AI_STT_PROVIDER",
+    "mlx_whisper",
+).strip().lower()
+
+# Multilingual Whisper Small is a practical default for a 16 GB
+# Apple-silicon machine. It is downloaded on first use and then cached
+# locally by Hugging Face / MLX Whisper.
+STT_MODEL = os.environ.get(
+    "PRIVATE_AI_STT_MODEL",
+    "mlx-community/whisper-small-mlx",
+).strip()
+
+STT_SAMPLE_RATE = 16000
+
+STT_MAX_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_STT_MAX_SECONDS",
+        "90",
+    )
+)
+
+STT_MAX_UPLOAD_BYTES = (
+    8
+    * 1024
+    * 1024
+)
+
+# Leave empty for Whisper language auto-detection. This is useful for
+# multilingual use and can be overridden later by a speech setting.
+STT_LANGUAGE = (
+    os.environ.get(
+        "PRIVATE_AI_STT_LANGUAGE",
+        "",
+    ).strip().lower()
+    or None
+)
+
+SHOW_SPEECH_ACTIVITY = True
+
+
+# =========================================================
 # WEB / FLASK
 # =========================================================
 

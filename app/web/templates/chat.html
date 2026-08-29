@@ -267,8 +267,8 @@
                     id="microphoneButton"
                     class="composer-icon-button"
                     type="button"
-                    aria-label="Voice input"
-                    title="Speech support coming later"
+                    aria-label="Start voice input"
+                    title="Voice input (local transcription)"
                 >
                     ◉
                 </button>
@@ -317,6 +317,10 @@
 {% block scripts %}
 <script
     src="{{ url_for('static', filename='js/chat.js') }}"
+    defer
+></script>
+<script
+    src="{{ url_for('static', filename='js/speech.js') }}"
     defer
 ></script>
 {% endblock %}

@@ -30,6 +30,16 @@ _TOOL_REGISTRY = {
         requires_network=True,
         sends_query_off_device=False,
     ),
+    "speech.stt": ToolSpec(
+        name="speech.stt",
+        capability="speech.use",
+        description=(
+            "Transcribe microphone audio into text using the local "
+            "speech-to-text provider."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
 }
 
 
