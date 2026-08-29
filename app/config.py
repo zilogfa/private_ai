@@ -167,6 +167,10 @@ if DEFAULT_WEB_MODE not in VALID_WEB_MODES:
 # SPEECH
 # =========================================================
 
+# -----------------------------
+# Speech-to-text
+# -----------------------------
+
 STT_PROVIDER = os.environ.get(
     "PRIVATE_AI_STT_PROVIDER",
     "mlx_whisper",
@@ -203,6 +207,55 @@ STT_LANGUAGE = (
         "",
     ).strip().lower()
     or None
+)
+
+
+# -----------------------------
+# Text-to-speech
+# -----------------------------
+
+TTS_PROVIDER = os.environ.get(
+    "PRIVATE_AI_TTS_PROVIDER",
+    "kokoro_mlx",
+).strip().lower()
+
+# Kokoro 82M is intentionally small and fast enough to coexist with the
+# local chat stack. Model files are downloaded once and then cached locally.
+TTS_MODEL = os.environ.get(
+    "PRIVATE_AI_TTS_MODEL",
+    "mlx-community/Kokoro-82M-bf16",
+).strip()
+
+TTS_DEFAULT_VOICE = os.environ.get(
+    "PRIVATE_AI_TTS_VOICE",
+    "af_heart",
+).strip()
+
+TTS_SPEED = float(
+    os.environ.get(
+        "PRIVATE_AI_TTS_SPEED",
+        "1.0",
+    )
+)
+
+TTS_SAMPLE_RATE = int(
+    os.environ.get(
+        "PRIVATE_AI_TTS_SAMPLE_RATE",
+        "24000",
+    )
+)
+
+if TTS_SAMPLE_RATE not in {
+    24000,
+    48000,
+}:
+    TTS_SAMPLE_RATE = 24000
+
+TTS_MAX_CHARS = int(
+    os.environ.get(
+        "PRIVATE_AI_TTS_MAX_CHARS",
+        "3200",
+    )
 )
 
 SHOW_SPEECH_ACTIVITY = True

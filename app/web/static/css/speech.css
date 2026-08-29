@@ -1,0 +1,228 @@
+/* ======================================================
+   PRIVATE AI v1.5.1 — SPEECH + SMALL VIEWPORT POLISH
+   Loaded by speech.js so the base UI stylesheet stays stable.
+   ====================================================== */
+
+#microphoneButton {
+    position: relative;
+    transition:
+        transform 70ms ease-out,
+        box-shadow 90ms ease-out,
+        background 150ms ease,
+        color 150ms ease;
+}
+
+#microphoneButton.speech-recording {
+    background: rgba(220, 55, 65, 0.12);
+    color: #d93646;
+}
+
+body[data-theme="dark"]
+#microphoneButton.speech-recording {
+    background: rgba(255, 100, 110, 0.16);
+    color: #ff7c86;
+}
+
+@media (prefers-color-scheme: dark) {
+    body[data-theme="system"]
+    #microphoneButton.speech-recording {
+        background: rgba(255, 100, 110, 0.16);
+        color: #ff7c86;
+    }
+}
+
+.speech-stop-glyph {
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 7px;
+    line-height: 1;
+}
+
+.speech-level-bars {
+    position: absolute;
+    left: 50%;
+    bottom: 7px;
+    height: 11px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 2px;
+    transform: translateX(-50%);
+}
+
+.speech-level-bars span {
+    width: 2px;
+    height: 3px;
+    border-radius: 999px;
+    background: currentColor;
+    transition: height 55ms linear;
+}
+
+#microphoneButton.speech-transcribing {
+    cursor: wait;
+    background: var(--panel-strong);
+    color: var(--muted);
+}
+
+.speech-transcribing-dots {
+    letter-spacing: 1px;
+    animation: speech-dots 900ms ease-in-out infinite;
+}
+
+@keyframes speech-dots {
+    0%,
+    100% {
+        opacity: 0.35;
+        transform: scale(0.92);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.05);
+    }
+}
+
+.assistant-speech-button {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    margin-left: 6px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    opacity: 0.78;
+    transition:
+        background 140ms ease,
+        color 140ms ease,
+        opacity 140ms ease,
+        transform 140ms ease;
+}
+
+.assistant-speech-button:hover,
+.assistant-speech-button:focus-visible {
+    background: var(--panel-strong);
+    color: var(--text);
+    opacity: 1;
+}
+
+.assistant-speech-button.loading {
+    cursor: wait;
+    animation: speech-button-pulse 900ms ease-in-out infinite;
+}
+
+.assistant-speech-button.playing {
+    background: var(--panel-strong);
+    color: var(--ui-accent, var(--text));
+    opacity: 1;
+}
+
+@keyframes speech-button-pulse {
+    0%,
+    100% {
+        opacity: 0.45;
+        transform: scale(0.94);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.04);
+    }
+}
+
+/* ------------------------------------------------------
+   Desktop short-height fix
+
+   The chat grid already has a scrollable middle row. These additions make
+   the shell itself a strict viewport box and allow the composer/sidebar
+   footer to scroll instead of falling below a short desktop window.
+   ------------------------------------------------------ */
+
+@media (min-width: 761px) {
+    html,
+    body {
+        height: 100%;
+    }
+
+    .chat-body {
+        height: 100dvh;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .chat-shell {
+        height: 100dvh;
+        max-height: 100dvh;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .chat-main {
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .messages {
+        min-height: 0;
+    }
+
+    .sidebar-footer {
+        flex: 0 0 auto;
+        max-height: min(48dvh, 360px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    @media (max-height: 620px) {
+        .chat-header {
+            height: 50px;
+        }
+
+        .messages {
+            padding-top: 14px;
+            padding-bottom: 76px;
+        }
+
+        .welcome-state {
+            min-height: 0;
+        }
+
+        .composer-wrap {
+            max-height: 44dvh;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            padding-bottom: 8px;
+        }
+
+        .composer-caption {
+            display: none;
+        }
+
+        .sidebar-top {
+            padding-top: 8px;
+            padding-bottom: 8px;
+        }
+
+        .sidebar-footer {
+            max-height: 42dvh;
+        }
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #microphoneButton,
+    .speech-level-bars span,
+    .assistant-speech-button,
+    .speech-transcribing-dots {
+        transition: none !important;
+        animation: none !important;
+    }
+}

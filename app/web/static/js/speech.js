@@ -13,17 +13,30 @@
         "attachmentNotice"
     );
 
+    const messages = document.getElementById(
+        "messages"
+    );
+
+    const composerForm = document.getElementById(
+        "composerForm"
+    );
+
+    const conversationList = document.getElementById(
+        "conversationList"
+    );
+
     if (
         !originalButton
         || !input
         || !notice
+        || !messages
     ) {
         return;
     }
 
-    // chat.js v1.4 owns a placeholder mic click handler. Replace the
-    // button node so v1.5 can attach the real speech handler without
-    // changing the large shared chat.js file.
+    // chat.js still owns the older placeholder mic click handler.
+    // Replacing the node removes that listener without coupling speech
+    // implementation details into the main chat UI file.
     const microphoneButton = (
         originalButton.cloneNode(true)
     );
@@ -55,6 +68,41 @@
     let recordingTimeout = null;
     let firstTranscription = true;
 
+    let ttsEnabled = false;
+    let firstSynthesis = true;
+    let currentSpeech = null;
+    let ttsAudioContext = null;
+    let suppressAutoSpeakUntil = (
+        Date.now() + 1500
+    );
+
+
+    // =====================================================
+    // UI HELPERS
+    // =====================================================
+
+    function ensureSpeechStylesheet() {
+        if (
+            document.querySelector(
+                'link[data-private-ai-speech-style]'
+            )
+        ) {
+            return;
+        }
+
+        const link = document.createElement(
+            "link"
+        );
+
+        link.rel = "stylesheet";
+        link.href = "/static/css/speech.css";
+        link.dataset.privateAiSpeechStyle = "1";
+
+        document.head.appendChild(
+            link
+        );
+    }
+
 
     function showSpeechNotice(
         message,
@@ -79,8 +127,26 @@
     }
 
 
+    function resetRecordingVisuals() {
+        microphoneButton.classList.remove(
+            "speech-recording",
+            "speech-transcribing"
+        );
+
+        microphoneButton.style.removeProperty(
+            "transform"
+        );
+
+        microphoneButton.style.removeProperty(
+            "box-shadow"
+        );
+    }
+
+
     function setIdleButton() {
-        microphoneButton.textContent = "◉";
+        resetRecordingVisuals();
+
+        microphoneButton.innerHTML = "◉";
         microphoneButton.disabled = false;
         microphoneButton.setAttribute(
             "aria-label",
@@ -93,20 +159,102 @@
 
 
     function setRecordingButton() {
-        microphoneButton.textContent = "■";
+        resetRecordingVisuals();
+
+        microphoneButton.classList.add(
+            "speech-recording"
+        );
+
+        microphoneButton.innerHTML = (
+            '<span class="speech-stop-glyph" aria-hidden="true">■</span>'
+            + '<span class="speech-level-bars" aria-hidden="true">'
+            + '<span></span><span></span><span></span>'
+            + '</span>'
+        );
+
         microphoneButton.disabled = false;
         microphoneButton.setAttribute(
             "aria-label",
             "Stop voice recording"
         );
         microphoneButton.title = (
-            "Stop voice recording"
+            "Recording locally — click to stop"
+        );
+    }
+
+
+    function setRecordingLevel(level) {
+        if (!recording) {
+            return;
+        }
+
+        const safeLevel = Math.max(
+            0,
+            Math.min(
+                1,
+                Number(level) || 0
+            )
+        );
+
+        const scale = (
+            1 + safeLevel * 0.09
+        );
+
+        const ring = (
+            2 + safeLevel * 6
+        );
+
+        microphoneButton.style.transform = (
+            `scale(${scale.toFixed(3)})`
+        );
+
+        microphoneButton.style.boxShadow = (
+            `0 0 0 ${ring.toFixed(1)}px rgba(220, 55, 65, ${(
+                0.08 + safeLevel * 0.16
+            ).toFixed(3)})`
+        );
+
+        const bars = (
+            microphoneButton
+            .querySelectorAll(
+                ".speech-level-bars span"
+            )
+        );
+
+        const multipliers = [
+            0.75,
+            1.15,
+            0.9,
+        ];
+
+        bars.forEach(
+            (bar, index) => {
+                const height = (
+                    2.5
+                    + safeLevel
+                    * 7
+                    * multipliers[index]
+                );
+
+                bar.style.height = (
+                    `${Math.min(10, height).toFixed(1)}px`
+                );
+            }
         );
     }
 
 
     function setTranscribingButton() {
-        microphoneButton.textContent = "…";
+        resetRecordingVisuals();
+
+        microphoneButton.classList.add(
+            "speech-transcribing"
+        );
+
+        microphoneButton.innerHTML = (
+            '<span class="speech-transcribing-dots" aria-hidden="true">•••</span>'
+        );
+
         microphoneButton.disabled = true;
         microphoneButton.setAttribute(
             "aria-label",
@@ -117,6 +265,10 @@
         );
     }
 
+
+    // =====================================================
+    // STT AUDIO HELPERS
+    // =====================================================
 
     function audioContextClass() {
         return (
@@ -608,6 +760,7 @@
         }
 
         recording = false;
+        setRecordingLevel(0);
 
         const capturedChunks = chunks;
         chunks = [];
@@ -751,6 +904,36 @@
                             channel
                         )
                     );
+
+                    let sumSquares = 0;
+                    let sampleCount = 0;
+
+                    for (
+                        let index = 0;
+                        index < channel.length;
+                        index += 8
+                    ) {
+                        const value = channel[index];
+                        sumSquares += (
+                            value * value
+                        );
+                        sampleCount += 1;
+                    }
+
+                    const rms = Math.sqrt(
+                        sumSquares
+                        / Math.max(
+                            1,
+                            sampleCount
+                        )
+                    );
+
+                    setRecordingLevel(
+                        Math.min(
+                            1,
+                            rms * 7.5
+                        )
+                    );
                 }
             );
 
@@ -759,17 +942,18 @@
             );
 
             // ScriptProcessor callbacks only fire while connected to an
-            // output. We write no output samples, so this connection stays
-            // silent and does not play the microphone back to the user.
+            // output. No output samples are written, so the microphone is
+            // not played back through the speakers.
             processor.connect(
                 audioContext.destination
             );
 
             recording = true;
             setRecordingButton();
+            setRecordingLevel(0.05);
 
             showSpeechNotice(
-                "Listening... tap the square microphone button to stop.",
+                "Listening locally... the mic button moves with your voice. Click it to stop.",
                 0
             );
 
@@ -960,6 +1144,564 @@
     }
 
 
+    // =====================================================
+    // TTS
+    // =====================================================
+
+    function ensureTtsAudioContext() {
+        const AudioContextImpl = (
+            audioContextClass()
+        );
+
+        if (!AudioContextImpl) {
+            return null;
+        }
+
+        if (
+            !ttsAudioContext
+            || ttsAudioContext.state === "closed"
+        ) {
+            ttsAudioContext = (
+                new AudioContextImpl()
+            );
+        }
+
+        return ttsAudioContext;
+    }
+
+
+    async function unlockTtsPlayback() {
+        const context = (
+            ensureTtsAudioContext()
+        );
+
+        if (!context) {
+            return false;
+        }
+
+        try {
+            if (context.state === "suspended") {
+                await context.resume();
+            }
+
+            return (
+                context.state === "running"
+            );
+
+        } catch (_) {
+            return false;
+        }
+    }
+
+
+    function resetSpeechButton(button) {
+        if (!button) {
+            return;
+        }
+
+        button.disabled = false;
+        button.textContent = "🔊";
+        button.classList.remove(
+            "loading",
+            "playing"
+        );
+        button.setAttribute(
+            "aria-label",
+            "Read response aloud"
+        );
+        button.title = (
+            "Read aloud locally"
+        );
+    }
+
+
+    function stopCurrentSpeech() {
+        if (!currentSpeech) {
+            return;
+        }
+
+        const speech = currentSpeech;
+        currentSpeech = null;
+
+        try {
+            if (speech.source) {
+                speech.source.onended = null;
+                speech.source.stop(0);
+                speech.source.disconnect();
+            }
+        } catch (_) {
+            // Already stopped or disconnected.
+        }
+
+        resetSpeechButton(
+            speech.button
+        );
+    }
+
+
+    function extractSpeakableText(article) {
+        const content = article.querySelector(
+            ".assistant-content"
+        );
+
+        if (!content) {
+            return "";
+        }
+
+        const clone = content.cloneNode(
+            true
+        );
+
+        clone.querySelectorAll(
+            "pre, .code-toolbar, .code-copy-button"
+        ).forEach(
+            (element) => element.remove()
+        );
+
+        const headings = Array.from(
+            clone.querySelectorAll(
+                "h1, h2, h3, h4, h5, h6"
+            )
+        );
+
+        const sourcesHeading = headings.find(
+            (heading) => (
+                heading.textContent
+                ?.trim()
+                .toLowerCase()
+                === "sources"
+            )
+        );
+
+        if (sourcesHeading) {
+            let node = sourcesHeading;
+
+            while (node) {
+                const next = node.nextSibling;
+                node.remove();
+                node = next;
+            }
+        }
+
+        return String(
+            clone.textContent
+            || ""
+        )
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+
+    async function speechErrorFromResponse(
+        response
+    ) {
+        try {
+            const data = await response.json();
+
+            return (
+                data.error
+                || `Speech generation failed (${response.status})`
+            );
+
+        } catch (_) {
+            return (
+                `Speech generation failed (${response.status})`
+            );
+        }
+    }
+
+
+    async function speakArticle(
+        article,
+        button,
+        auto = false
+    ) {
+        if (
+            currentSpeech
+            && currentSpeech.article === article
+        ) {
+            stopCurrentSpeech();
+            return;
+        }
+
+        const text = extractSpeakableText(
+            article
+        );
+
+        if (!text) {
+            if (!auto) {
+                showSpeechNotice(
+                    "There is no response text to read aloud."
+                );
+            }
+            return;
+        }
+
+        stopCurrentSpeech();
+
+        // Safari/WebKit may lose the user-activation permission while local
+        // synthesis is running. Unlock Web Audio immediately from the click.
+        if (!auto) {
+            await unlockTtsPlayback();
+        }
+
+        button.disabled = true;
+        button.textContent = "…";
+        button.classList.add(
+            "loading"
+        );
+        button.title = (
+            "Generating speech locally"
+        );
+
+        if (!auto) {
+            showSpeechNotice(
+                firstSynthesis
+                    ? (
+                        "Generating speech locally... First use may take longer "
+                        + "while the Kokoro voice model downloads."
+                    )
+                    : "Generating speech locally...",
+                0
+            );
+        }
+
+        try {
+            const response = await fetch(
+                "/api/speech/synthesize",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type":
+                            "application/json",
+                        "X-CSRF-Token":
+                            csrfToken,
+                    },
+                    body: JSON.stringify({
+                        text,
+                    }),
+                }
+            );
+
+            if (response.status === 401) {
+                window.location.href = "/login";
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error(
+                    await speechErrorFromResponse(
+                        response
+                    )
+                );
+            }
+
+            const truncated = (
+                response.headers.get(
+                    "X-Speech-Truncated"
+                )
+                === "1"
+            );
+
+            const audioBytes = (
+                await response.arrayBuffer()
+            );
+
+            const context = (
+                ensureTtsAudioContext()
+            );
+
+            if (!context) {
+                throw new Error(
+                    "This browser does not support local audio playback."
+                );
+            }
+
+            if (context.state !== "running") {
+                const unlocked = (
+                    await unlockTtsPlayback()
+                );
+
+                if (!unlocked) {
+                    resetSpeechButton(
+                        button
+                    );
+
+                    if (auto) {
+                        showSpeechNotice(
+                            "Auto speech is ready, but the browser blocked autoplay. Click the speaker button to play it.",
+                            5500
+                        );
+                        return;
+                    }
+
+                    throw new Error(
+                        "Browser audio is blocked. Click the speaker button again to allow playback."
+                    );
+                }
+            }
+
+            let audioBuffer = null;
+
+            try {
+                audioBuffer = (
+                    await context.decodeAudioData(
+                        audioBytes.slice(0)
+                    )
+                );
+
+            } catch (_) {
+                throw new Error(
+                    "The browser could not decode the generated speech audio."
+                );
+            }
+
+            const source = (
+                context.createBufferSource()
+            );
+
+            source.buffer = audioBuffer;
+            source.connect(
+                context.destination
+            );
+
+            currentSpeech = {
+                article,
+                button,
+                source,
+                context,
+            };
+
+            button.disabled = false;
+            button.textContent = "■";
+            button.classList.remove(
+                "loading"
+            );
+            button.classList.add(
+                "playing"
+            );
+            button.setAttribute(
+                "aria-label",
+                "Stop reading response"
+            );
+            button.title = (
+                "Stop reading aloud"
+            );
+
+            source.onended = () => {
+                if (
+                    currentSpeech
+                    && currentSpeech.source === source
+                ) {
+                    stopCurrentSpeech();
+                }
+            };
+
+            source.start(0);
+
+            firstSynthesis = false;
+
+            if (!auto) {
+                showSpeechNotice(
+                    truncated
+                        ? "Reading locally. Long response was shortened for speech."
+                        : "Reading response aloud locally."
+                );
+            }
+
+        } catch (error) {
+            resetSpeechButton(
+                button
+            );
+
+            if (!auto) {
+                showSpeechNotice(
+                    (
+                        "Text-to-speech failed: "
+                        + error.message
+                    ),
+                    7000
+                );
+            }
+        }
+    }
+
+
+    function maybeAutoSpeak(article) {
+        if (
+            !ttsEnabled
+            || article.dataset.ttsAutoAttempted
+            || Date.now() < suppressAutoSpeakUntil
+        ) {
+            return;
+        }
+
+        const activity = article.querySelector(
+            ".activity-row"
+        );
+
+        const content = article.querySelector(
+            ".assistant-content"
+        );
+
+        if (
+            !activity
+            || !activity.hidden
+            || !content
+            || !content.textContent.trim()
+        ) {
+            return;
+        }
+
+        article.dataset.ttsAutoAttempted = "1";
+
+        const button = article.querySelector(
+            ".assistant-speech-button"
+        );
+
+        if (button) {
+            window.setTimeout(
+                () => {
+                    speakArticle(
+                        article,
+                        button,
+                        true
+                    );
+                },
+                120
+            );
+        }
+    }
+
+
+    function enhanceAssistantMessage(article) {
+        if (
+            !article
+            || article.dataset.speechEnhanced
+        ) {
+            return;
+        }
+
+        const meta = article.querySelector(
+            ".assistant-meta"
+        );
+
+        const content = article.querySelector(
+            ".assistant-content"
+        );
+
+        const activity = article.querySelector(
+            ".activity-row"
+        );
+
+        if (
+            !meta
+            || !content
+            || !activity
+        ) {
+            return;
+        }
+
+        article.dataset.speechEnhanced = "1";
+
+        const button = document.createElement(
+            "button"
+        );
+
+        button.type = "button";
+        button.className = (
+            "assistant-speech-button"
+        );
+
+        resetSpeechButton(
+            button
+        );
+
+        button.addEventListener(
+            "click",
+            () => {
+                speakArticle(
+                    article,
+                    button,
+                    false
+                );
+            }
+        );
+
+        meta.appendChild(
+            button
+        );
+
+        const completionObserver = (
+            new MutationObserver(
+                () => {
+                    maybeAutoSpeak(
+                        article
+                    );
+                }
+            )
+        );
+
+        completionObserver.observe(
+            activity,
+            {
+                attributes: true,
+                attributeFilter: [
+                    "hidden",
+                    "style",
+                    "class",
+                ],
+            }
+        );
+
+        maybeAutoSpeak(
+            article
+        );
+    }
+
+
+    function enhanceExistingAssistantMessages() {
+        messages.querySelectorAll(
+            ".assistant-message"
+        ).forEach(
+            enhanceAssistantMessage
+        );
+    }
+
+
+    async function loadSpeechPreferences() {
+        try {
+            const response = await fetch(
+                "/api/settings",
+                {
+                    headers: {
+                        "Accept":
+                            "application/json",
+                    },
+                }
+            );
+
+            if (!response.ok) {
+                return;
+            }
+
+            const data = await response.json();
+
+            ttsEnabled = Boolean(
+                data.tts_enabled
+            );
+
+        } catch (_) {
+            // Manual speaker controls remain available even if settings
+            // could not be loaded.
+        }
+    }
+
+
+    // =====================================================
+    // EVENTS / OBSERVERS
+    // =====================================================
+
     microphoneButton.addEventListener(
         "click",
         async () => {
@@ -977,9 +1719,90 @@
     );
 
 
+    if (conversationList) {
+        conversationList.addEventListener(
+            "click",
+            () => {
+                // Loading history creates assistant DOM nodes too. Avoid
+                // treating those as brand-new replies for auto TTS.
+                suppressAutoSpeakUntil = (
+                    Date.now() + 5000
+                );
+
+                stopCurrentSpeech();
+            },
+            true
+        );
+    }
+
+
+    if (composerForm) {
+        composerForm.addEventListener(
+            "submit",
+            () => {
+                // Submitting is a user gesture, so unlock Web Audio here.
+                // This lets optional automatic TTS play after the reply.
+                unlockTtsPlayback();
+                stopCurrentSpeech();
+            },
+            true
+        );
+    }
+
+
+    const messageObserver = new MutationObserver(
+        (mutations) => {
+            for (const mutation of mutations) {
+                for (const node of mutation.addedNodes) {
+                    if (!(node instanceof Element)) {
+                        continue;
+                    }
+
+                    if (
+                        node.matches(
+                            ".assistant-message"
+                        )
+                    ) {
+                        enhanceAssistantMessage(
+                            node
+                        );
+                    }
+
+                    node.querySelectorAll?.(
+                        ".assistant-message"
+                    ).forEach(
+                        enhanceAssistantMessage
+                    );
+                }
+            }
+        }
+    );
+
+    messageObserver.observe(
+        messages,
+        {
+            childList: true,
+            subtree: true,
+        }
+    );
+
+
     window.addEventListener(
         "beforeunload",
         () => {
+            stopCurrentSpeech();
+
+            if (
+                ttsAudioContext
+                && ttsAudioContext.state !== "closed"
+            ) {
+                try {
+                    ttsAudioContext.close();
+                } catch (_) {
+                    // Ignore shutdown errors.
+                }
+            }
+
             if (recording) {
                 recording = false;
                 clearRecordingResources();
@@ -988,5 +1811,12 @@
     );
 
 
+    // =====================================================
+    // START
+    // =====================================================
+
+    ensureSpeechStylesheet();
     setIdleButton();
+    enhanceExistingAssistantMessages();
+    loadSpeechPreferences();
 })();

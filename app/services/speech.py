@@ -1,4 +1,5 @@
 import io
+import re
 import threading
 import wave
 
@@ -16,10 +17,13 @@ class SpeechUnavailableError(SpeechError):
 
 
 _STT_LOCK = threading.Lock()
+_TTS_LOCK = threading.Lock()
+_TTS_MODEL_INSTANCE = None
+_TTS_MODEL_LOCK = threading.Lock()
 
 
 # =========================================================
-# WAV DECODING
+# WAV DECODING FOR STT
 # =========================================================
 
 
@@ -220,7 +224,7 @@ def decode_pcm16_wav(
 
 
 # =========================================================
-# PROVIDER
+# STT PROVIDER
 # =========================================================
 
 
@@ -346,4 +350,291 @@ def transcribe_wav_bytes(
         ),
         "provider": provider,
         "model": config.STT_MODEL,
+    }
+
+
+# =========================================================
+# TTS TEXT / AUDIO HELPERS
+# =========================================================
+
+_CONTROL_CHARACTER_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
+
+
+def normalize_tts_text(text):
+    value = str(
+        text or ""
+    )
+
+    value = _CONTROL_CHARACTER_RE.sub(
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"[ \t]+",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        value,
+    )
+
+    value = value.strip()
+
+    if not value:
+        raise SpeechError(
+            "There is no text to read aloud."
+        )
+
+    max_chars = max(
+        200,
+        int(
+            config.TTS_MAX_CHARS
+        ),
+    )
+
+    truncated = (
+        len(value)
+        > max_chars
+    )
+
+    if truncated:
+        value = value[:max_chars]
+
+        if " " in value:
+            value = value.rsplit(
+                " ",
+                1,
+            )[0]
+
+        value = value.rstrip(
+            " ,;:-"
+        )
+
+        if value and value[-1] not in ".!?":
+            value += "."
+
+    return value, truncated
+
+
+def float_audio_to_wav_bytes(
+    audio,
+    sample_rate,
+):
+    samples = np.asarray(
+        audio,
+        dtype=np.float32,
+    ).reshape(-1)
+
+    if not len(samples):
+        raise SpeechError(
+            "The speech model returned empty audio."
+        )
+
+    samples = np.nan_to_num(
+        samples,
+        nan=0.0,
+        posinf=1.0,
+        neginf=-1.0,
+    )
+
+    samples = np.clip(
+        samples,
+        -1.0,
+        1.0,
+    )
+
+    pcm = (
+        samples
+        * 32767.0
+    ).astype(
+        "<i2"
+    )
+
+    output = io.BytesIO()
+
+    with wave.open(
+        output,
+        "wb",
+    ) as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(
+            int(sample_rate)
+        )
+        wav_file.writeframes(
+            pcm.tobytes()
+        )
+
+    return output.getvalue()
+
+
+# =========================================================
+# TTS PROVIDER
+# =========================================================
+
+
+def _get_kokoro_model():
+    global _TTS_MODEL_INSTANCE
+
+    if _TTS_MODEL_INSTANCE is not None:
+        return _TTS_MODEL_INSTANCE
+
+    try:
+        from kokoro_mlx import KokoroTTS
+
+    except ImportError as error:
+        raise SpeechUnavailableError(
+            (
+                "Kokoro MLX is not installed. Run "
+                "'python -m pip install -r requirements.txt' "
+                "inside the project virtual environment."
+            )
+        ) from error
+
+    with _TTS_MODEL_LOCK:
+        if _TTS_MODEL_INSTANCE is None:
+            try:
+                _TTS_MODEL_INSTANCE = (
+                    KokoroTTS.from_pretrained(
+                        config.TTS_MODEL
+                    )
+                )
+
+            except Exception as error:
+                raise SpeechError(
+                    (
+                        "Could not load the local text-to-speech model. "
+                        "On first use, make sure the Mac is online so the "
+                        "Kokoro model can download, then try again. "
+                        f"Details: {error}"
+                    )
+                ) from error
+
+    return _TTS_MODEL_INSTANCE
+
+
+def _synthesize_kokoro(
+    text,
+    voice,
+):
+    model = _get_kokoro_model()
+
+    try:
+        with _TTS_LOCK:
+            result = model.generate(
+                text=text,
+                voice=voice,
+                speed=config.TTS_SPEED,
+                sample_rate=
+                    config.TTS_SAMPLE_RATE,
+            )
+
+    except Exception as error:
+        raise SpeechError(
+            (
+                "Local speech synthesis failed. "
+                f"Details: {error}"
+            )
+        ) from error
+
+    audio = getattr(
+        result,
+        "audio",
+        None,
+    )
+
+    sample_rate = getattr(
+        result,
+        "sample_rate",
+        config.TTS_SAMPLE_RATE,
+    )
+
+    duration = getattr(
+        result,
+        "duration",
+        None,
+    )
+
+    if audio is None:
+        raise SpeechError(
+            "The speech model did not return audio."
+        )
+
+    wav_bytes = float_audio_to_wav_bytes(
+        audio,
+        sample_rate,
+    )
+
+    if duration is None:
+        duration = (
+            len(np.asarray(audio).reshape(-1))
+            / float(sample_rate)
+        )
+
+    return {
+        "wav_bytes": wav_bytes,
+        "duration_seconds": round(
+            float(duration),
+            2,
+        ),
+        "sample_rate": int(
+            sample_rate
+        ),
+        "voice": voice,
+    }
+
+
+def synthesize_text_to_wav(
+    text,
+    voice=None,
+):
+    normalized_text, truncated = (
+        normalize_tts_text(
+            text
+        )
+    )
+
+    selected_voice = (
+        str(
+            voice
+            or config.TTS_DEFAULT_VOICE
+            or "af_heart"
+        )
+        .strip()
+        or "af_heart"
+    )
+
+    provider = str(
+        config.TTS_PROVIDER
+        or ""
+    ).strip().lower()
+
+    if provider == "kokoro_mlx":
+        result = _synthesize_kokoro(
+            normalized_text,
+            selected_voice,
+        )
+
+    else:
+        raise SpeechUnavailableError(
+            (
+                "Unsupported text-to-speech provider: "
+                f"{config.TTS_PROVIDER}"
+            )
+        )
+
+    return {
+        **result,
+        "provider": provider,
+        "model": config.TTS_MODEL,
+        "truncated": truncated,
+        "text_chars": len(
+            normalized_text
+        ),
     }

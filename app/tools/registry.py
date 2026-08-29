@@ -40,6 +40,16 @@ _TOOL_REGISTRY = {
         requires_network=False,
         sends_query_off_device=False,
     ),
+    "speech.tts": ToolSpec(
+        name="speech.tts",
+        capability="speech.use",
+        description=(
+            "Generate spoken audio from assistant text using the local "
+            "text-to-speech provider."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
 }
 
 
