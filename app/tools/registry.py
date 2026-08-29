@@ -50,12 +50,22 @@ _TOOL_REGISTRY = {
         requires_network=False,
         sends_query_off_device=False,
     ),
-    "image.generate": ToolSpec(
-        name="image.generate",
-        capability="image_generation.use",
+    "document.index": ToolSpec(
+        name="document.index",
+        capability="chat.use",
         description=(
-            "Generate an image from a text prompt using the local "
-            "Apple-silicon image generation provider."
+            "Index readable uploaded document text into the user's local "
+            "persistent RAG store."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
+    "document.search": ToolSpec(
+        name="document.search",
+        capability="chat.use",
+        description=(
+            "Semantically retrieve relevant passages from the user's locally "
+            "indexed documents."
         ),
         requires_network=False,
         sends_query_off_device=False,
@@ -64,12 +74,8 @@ _TOOL_REGISTRY = {
 
 
 def get_tool_spec(name):
-    return _TOOL_REGISTRY.get(
-        str(name or "").strip()
-    )
+    return _TOOL_REGISTRY.get(str(name or "").strip())
 
 
 def list_tool_specs():
-    return list(
-        _TOOL_REGISTRY.values()
-    )
+    return list(_TOOL_REGISTRY.values())
