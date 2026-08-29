@@ -50,6 +50,16 @@ _TOOL_REGISTRY = {
         requires_network=False,
         sends_query_off_device=False,
     ),
+    "image.generate": ToolSpec(
+        name="image.generate",
+        capability="image_generation.use",
+        description=(
+            "Generate an image from a text prompt using the local "
+            "Apple-silicon image generation provider."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
 }
 
 

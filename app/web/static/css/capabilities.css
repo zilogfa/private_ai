@@ -1,0 +1,158 @@
+/* ======================================================
+   CAPABILITY UI EXTENSIONS
+   Loaded after app.css so capability-specific fixes can
+   stay modular instead of growing the core stylesheet.
+   ====================================================== */
+
+
+/* ======================================================
+   GENERATED IMAGES
+   ====================================================== */
+
+.rendered-markdown img {
+    display: block;
+    width: min(100%, 768px);
+    height: auto;
+    margin: 10px 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background: var(--panel);
+    box-shadow: var(--shadow);
+}
+
+.rendered-markdown a > img {
+    cursor: zoom-in;
+}
+
+
+/* ======================================================
+   DESKTOP SHORT-VIEWPORT SAFETY
+
+   The mobile layout already tracks visualViewport height.
+   On desktop, keep the entire chat shell inside the dynamic
+   viewport and let the internal regions shrink/scroll rather
+   than allowing the composer or sidebar footer to fall below
+   the browser window.
+   ====================================================== */
+
+@media (min-width: 761px) {
+    html,
+    body.chat-body {
+        height: 100%;
+        min-height: 0;
+    }
+
+    body.chat-body {
+        height: 100dvh;
+        max-height: 100dvh;
+        overflow: hidden;
+    }
+
+    .chat-shell {
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .chat-main,
+    .sidebar {
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+    }
+
+    .conversation-list {
+        min-height: 0;
+    }
+
+    .sidebar-footer {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: 52vh;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .composer-wrap {
+        min-height: 0;
+        max-height: 50vh;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+}
+
+@media (min-width: 761px) and (max-height: 620px) {
+    .chat-header {
+        height: 50px;
+        min-height: 50px;
+    }
+
+    .messages {
+        padding-top: 12px;
+        padding-bottom: 82px;
+    }
+
+    .composer-wrap {
+        padding-bottom: 8px;
+    }
+
+    .composer-caption {
+        display: none;
+    }
+
+    .sidebar-top {
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
+    .sidebar-footer {
+        max-height: 58vh;
+        padding-top: 6px;
+        padding-bottom: 6px;
+    }
+
+    .sidebar-link {
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
+    .sidebar-user {
+        margin-top: 3px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+    }
+}
+
+@media (min-width: 761px) and (max-height: 470px) {
+    .chat-header {
+        height: 46px;
+        min-height: 46px;
+    }
+
+    .messages {
+        padding-top: 8px;
+        padding-bottom: 64px;
+    }
+
+    .composer {
+        min-height: 50px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+    }
+
+    .sidebar-section-title {
+        padding-top: 4px;
+        padding-bottom: 4px;
+    }
+
+    .new-chat-button {
+        margin-top: 5px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
+    .sidebar-footer {
+        max-height: 62vh;
+    }
+}

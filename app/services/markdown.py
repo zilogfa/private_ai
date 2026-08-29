@@ -43,6 +43,7 @@ ALLOWED_TAGS = [
     "h5",
     "h6",
     "a",
+    "img",
     "table",
     "thead",
     "tbody",
@@ -61,6 +62,13 @@ ALLOWED_ATTRIBUTES = {
     "a": [
         "href",
         "title",
+    ],
+
+    "img": [
+        "src",
+        "alt",
+        "title",
+        "loading",
     ],
 
     "div": [
@@ -112,6 +120,10 @@ class PrivateAIMarkdownRenderer(
 
     Raw HTML from model output is escaped by Mistune.
     The final result is sanitized again with Bleach.
+
+    Image Markdown is deliberately restricted to Private AI's authenticated
+    generated-image route. This prevents model output from silently embedding
+    arbitrary remote tracking images in the browser.
     """
 
     def __init__(self):
@@ -204,6 +216,52 @@ class PrivateAIMarkdownRenderer(
             '</div>\n'
         )
 
+    def image(
+        self,
+        text,
+        url,
+        title=None,
+    ):
+        url = str(
+            url or ""
+        ).strip()
+
+        # Only authenticated local generated images are renderable. External
+        # image URLs remain plain alt text rather than causing a browser fetch.
+        if not url.startswith(
+            "/api/images/"
+        ):
+            return html.escape(
+                str(text or "Image")
+            )
+
+        safe_url = html.escape(
+            url,
+            quote=True,
+        )
+        safe_alt = html.escape(
+            str(text or "Generated image"),
+            quote=True,
+        )
+
+        title_attribute = ""
+
+        if title:
+            safe_title = html.escape(
+                str(title),
+                quote=True,
+            )
+            title_attribute = (
+                f' title="{safe_title}"'
+            )
+
+        return (
+            f'<img src="{safe_url}" '
+            f'alt="{safe_alt}" '
+            f'loading="lazy"'
+            f'{title_attribute}>'
+        )
+
 
 _renderer = (
     PrivateAIMarkdownRenderer()
@@ -223,6 +281,7 @@ _markdown = mistune.create_markdown(
 # =========================================================
 # PUBLIC RENDER FUNCTION
 # =========================================================
+
 
 def render_markdown(
     content,

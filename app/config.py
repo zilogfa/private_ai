@@ -262,6 +262,104 @@ SHOW_SPEECH_ACTIVITY = True
 
 
 # =========================================================
+# IMAGE GENERATION
+# =========================================================
+
+# Image generation is intentionally a separate local execution capability.
+# It runs MFLUX in a child process so the large diffusion model is released
+# from memory after each image instead of remaining inside the Flask server.
+IMAGE_GENERATION_PROVIDER = os.environ.get(
+    "PRIVATE_AI_IMAGE_PROVIDER",
+    "mflux_z_image_turbo",
+).strip().lower()
+
+# Pre-quantized 4-bit weights are used by default for small-memory Macs.
+# The first generation downloads the model once; later generations reuse the
+# local Hugging Face/MFLUX cache.
+IMAGE_GENERATION_MODEL = os.environ.get(
+    "PRIVATE_AI_IMAGE_MODEL",
+    "filipstrand/Z-Image-Turbo-mflux-4bit",
+).strip()
+
+IMAGE_GENERATION_MODEL_LABEL = (
+    "z-image-turbo-4bit"
+)
+
+IMAGE_GENERATION_WIDTH = int(
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_WIDTH",
+        "768",
+    )
+)
+
+IMAGE_GENERATION_HEIGHT = int(
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_HEIGHT",
+        "768",
+    )
+)
+
+# Keep dimensions bounded and divisible by 16 for predictable MLX behavior.
+IMAGE_GENERATION_WIDTH = max(
+    512,
+    min(1024, IMAGE_GENERATION_WIDTH),
+)
+IMAGE_GENERATION_WIDTH -= (
+    IMAGE_GENERATION_WIDTH % 16
+)
+
+IMAGE_GENERATION_HEIGHT = max(
+    512,
+    min(1024, IMAGE_GENERATION_HEIGHT),
+)
+IMAGE_GENERATION_HEIGHT -= (
+    IMAGE_GENERATION_HEIGHT % 16
+)
+
+IMAGE_GENERATION_STEPS = int(
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_STEPS",
+        "9",
+    )
+)
+
+IMAGE_GENERATION_STEPS = max(
+    4,
+    min(12, IMAGE_GENERATION_STEPS),
+)
+
+IMAGE_GENERATION_LOW_RAM = (
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_LOW_RAM",
+        "1",
+    )
+    != "0"
+)
+
+# Best-effort unload of currently resident Ollama models before diffusion
+# generation. This is useful on 16 GB unified-memory systems and is safe:
+# the chat model simply reloads on the next normal chat request.
+IMAGE_RELEASE_OLLAMA_BEFORE_GENERATION = (
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_RELEASE_OLLAMA",
+        "1",
+    )
+    != "0"
+)
+
+IMAGE_GENERATION_TIMEOUT_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_IMAGE_TIMEOUT_SECONDS",
+        "2400",
+    )
+)
+
+IMAGE_GENERATION_MAX_PROMPT_CHARS = 1800
+
+SHOW_IMAGE_GENERATION_ACTIVITY = True
+
+
+# =========================================================
 # WEB / FLASK
 # =========================================================
 

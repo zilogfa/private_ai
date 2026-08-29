@@ -11,3 +11,4 @@ beautifulsoup4>=4.12,<5
 numpy>=1.26,<3
 mlx-whisper>=0.4,<1
 kokoro-mlx>=0.1.2,<0.2
+mflux>=0.19.1,<0.20

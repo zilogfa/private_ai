@@ -154,6 +154,17 @@ def create_app():
         speech_api_bp,
     )
 
+    from app.api.image_routes import (
+        image_api_bp,
+        register_image_chat_interceptor,
+    )
+
+    # The explicit /image interceptor is registered after auth/CSRF so it
+    # participates in the same security boundary as the regular chat API.
+    register_image_chat_interceptor(
+        app
+    )
+
     app.register_blueprint(
         web_bp
     )
@@ -164,6 +175,10 @@ def create_app():
 
     app.register_blueprint(
         speech_api_bp
+    )
+
+    app.register_blueprint(
+        image_api_bp
     )
 
     @app.after_request
