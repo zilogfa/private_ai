@@ -146,6 +146,22 @@ WEB_SAFE_SEARCH = 1
 
 SHOW_WEB_ACTIVITY = True
 
+# Web access policy. Explicit /web and /fetch commands remain
+# available even when automatic web access is off.
+VALID_WEB_MODES = (
+    "off",
+    "auto",
+    "always",
+)
+
+DEFAULT_WEB_MODE = os.environ.get(
+    "PRIVATE_AI_DEFAULT_WEB_MODE",
+    "off",
+).strip().lower()
+
+if DEFAULT_WEB_MODE not in VALID_WEB_MODES:
+    DEFAULT_WEB_MODE = "off"
+
 
 # =========================================================
 # WEB / FLASK

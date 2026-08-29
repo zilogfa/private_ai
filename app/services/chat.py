@@ -61,7 +61,7 @@ from app.services.web_research import (
     build_private_search_query,
     build_web_context,
     format_sources_markdown,
-    parse_web_command,
+    resolve_web_request,
     research_direct_url,
     research_search_query,
     sources_event_data,
@@ -276,6 +276,7 @@ def stream_chat(
     model_mode=None,
     include_thinking=True,
     attachments=None,
+    web_mode=None,
 ):
     """
     Shared UI-independent chat pipeline.
@@ -288,8 +289,10 @@ def stream_chat(
         DOCX/TXT/MD/CSV/JSON -> local text extraction
         text PDF -> local text extraction
         scanned/low-text PDF pages -> local VLM
-        /web <query> -> local SearXNG + native page fetch
-        /fetch <url> -> native public webpage fetch
+        /web <query> -> explicit local SearXNG search
+        /fetch <url> -> explicit native public webpage fetch
+        web auto -> conservative fresh-info routing
+        web always -> search each normal prompt (URL prompts fetch)
 
     Standard event families:
         status
@@ -309,9 +312,10 @@ def stream_chat(
     )
 
     try:
-        web_mode, effective_user_message = (
-            parse_web_command(
-                user_message
+        web_request = (
+            resolve_web_request(
+                user_message,
+                preference=web_mode,
             )
         )
 
@@ -323,8 +327,24 @@ def stream_chat(
         }
         return
 
+    resolved_web_mode = (
+        web_request.get("mode")
+    )
+
+    effective_user_message = (
+        web_request.get(
+            "user_message"
+        )
+        or user_message
+    )
+
+    web_target = (
+        web_request.get("target")
+        or effective_user_message
+    )
+
     if (
-        web_mode
+        resolved_web_mode
         and not user_has_permission(
             user_id,
             "web_search.use",
@@ -402,7 +422,7 @@ def stream_chat(
         effective_user_message,
     )
 
-    if web_mode:
+    if resolved_web_mode:
         messages = (
             _replace_latest_user_content(
                 messages,
@@ -476,12 +496,27 @@ def stream_chat(
     web_research = None
     web_context = None
 
-    if web_mode:
+    if resolved_web_mode:
+        yield {
+            "type": "tool",
+            "tool": "web.route",
+            "state": "done",
+            "mode": resolved_web_mode,
+            "automatic": bool(
+                web_request.get(
+                    "automatic"
+                )
+            ),
+            "reason": web_request.get(
+                "reason"
+            ),
+        }
+
         try:
-            if web_mode == "search":
+            if resolved_web_mode == "search":
                 search_query = (
                     build_private_search_query(
-                        effective_user_message
+                        web_target
                     )
                 )
 
@@ -525,19 +560,19 @@ def stream_chat(
                         "type": "activity",
                         "phase": "reading",
                         "label": "Reading source...",
-                        "detail": effective_user_message,
+                        "detail": web_target,
                     }
 
                 yield {
                     "type": "tool",
                     "tool": "web.fetch",
                     "state": "start",
-                    "url": effective_user_message,
+                    "url": web_target,
                 }
 
                 web_research = (
                     research_direct_url(
-                        effective_user_message
+                        web_target
                     )
                 )
 
@@ -709,7 +744,7 @@ def stream_chat(
 
         if (
             document_attachments
-            or web_mode
+            or resolved_web_mode
         ):
             context_size = max(
                 (
@@ -719,7 +754,7 @@ def stream_chat(
                 ),
                 (
                     WEB_CONTEXT_SIZE
-                    if web_mode
+                    if resolved_web_mode
                     else 0
                 ),
             )

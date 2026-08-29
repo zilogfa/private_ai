@@ -646,13 +646,35 @@ a {
     font-weight: 650;
 }
 
-.model-control select {
+.header-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.model-control,
+.web-control {
+    display: inline-flex;
+    min-width: 0;
+}
+
+.model-control select,
+.web-control select {
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--bg);
     color: var(--text);
     padding: 8px 10px;
     outline: none;
+}
+
+.web-control select {
+    color: var(--muted);
+}
+
+.web-control select:focus,
+.model-control select:focus {
+    border-color: var(--ui-accent, var(--text));
 }
 
 .icon-button,
@@ -1533,6 +1555,16 @@ td small {
         padding: 0 10px;
     }
 
+    .header-controls {
+        gap: 5px;
+    }
+
+    .model-control select,
+    .web-control select {
+        padding: 7px 8px;
+        font-size: 13px;
+    }
+
     .messages {
         padding:
             18px
@@ -1618,18 +1650,25 @@ td small {
     }
 }
 
+@media (max-width: 520px) {
+    .chat-title {
+        display: none;
+    }
+
+    .header-controls {
+        margin-left: auto;
+    }
+}
+
 @media (max-width: 380px) {
     .chat-header {
         gap: 6px;
     }
 
-    .chat-title {
-        font-size: 14px;
-    }
-
-    .model-control select {
-        padding: 7px 8px;
-        font-size: 13px;
+    .model-control select,
+    .web-control select {
+        padding: 6px 7px;
+        font-size: 12px;
     }
 
     .composer {

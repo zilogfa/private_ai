@@ -73,6 +73,10 @@
         "modelSelect"
     );
 
+    const webModeSelect = document.getElementById(
+        "webModeSelect"
+    );
+
     const sendButton = document.getElementById(
         "sendButton"
     );
@@ -127,6 +131,19 @@
     modelSelect.value = (
         app.dataset.defaultModel
         || "auto"
+    );
+
+    const initialWebMode = (
+        app.dataset.defaultWebMode
+        || "off"
+    );
+
+    webModeSelect.value = (
+        ["off", "auto", "always"].includes(
+            initialWebMode
+        )
+        ? initialWebMode
+        : "off"
     );
 
     const ACTIVITY_LABELS = {
@@ -2079,6 +2096,9 @@
                         model_mode:
                             modelSelect.value,
 
+                        web_mode:
+                            webModeSelect.value,
+
                         attachment_ids:
                             attachments.map(
                                 (attachment) => (
@@ -2547,6 +2567,49 @@
             showNotice(
                 "Speech foundation is reserved. STT/TTS will be connected later."
             );
+        }
+    );
+
+
+    webModeSelect.addEventListener(
+        "change",
+        async () => {
+            try {
+                await requestJson(
+                    "/api/settings",
+                    {
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                        },
+
+                        body: JSON.stringify({
+                            web_mode:
+                                webModeSelect.value,
+                        }),
+                    }
+                );
+
+                const labels = {
+                    off: "Web access: explicit commands only",
+                    auto: "Web access: automatic when fresh info is needed",
+                    always: "Web access: search every normal prompt",
+                };
+
+                showNotice(
+                    labels[
+                        webModeSelect.value
+                    ]
+                    || "Web preference saved."
+                );
+
+            } catch (error) {
+                showNotice(
+                    "Could not save web preference."
+                );
+            }
         }
     );
 

@@ -17,7 +17,9 @@ from app.auth import (
 )
 
 from app.config import (
+    DEFAULT_WEB_MODE,
     VALID_MODEL_MODES,
+    VALID_WEB_MODES,
 )
 
 from app.database import (
@@ -634,6 +636,9 @@ def save_settings():
 
         kwargs["theme"] = theme
 
+    current_settings = None
+    extra_settings = None
+
     if "accent_color" in payload:
         accent_color = (
             normalize_accent_color(
@@ -659,11 +664,58 @@ def save_settings():
             or {}
         )
 
-        kwargs["extra"] = (
+        extra_settings = (
             merge_accent_setting(
                 current_settings,
                 accent_color,
             )
+        )
+
+    if "web_mode" in payload:
+        web_mode = (
+            str(
+                payload.get(
+                    "web_mode",
+                    "",
+                )
+            )
+            .lower()
+            .strip()
+        )
+
+        if web_mode not in VALID_WEB_MODES:
+            return (
+                jsonify({
+                    "error":
+                        "invalid_web_mode"
+                }),
+                400,
+            )
+
+        if current_settings is None:
+            current_settings = (
+                get_user_settings(
+                    user_id
+                )
+                or {}
+            )
+
+        if extra_settings is None:
+            extra_settings = dict(
+                current_settings.get(
+                    "extra",
+                    {},
+                )
+                or {}
+            )
+
+        extra_settings[
+            "web_mode"
+        ] = web_mode
+
+    if extra_settings is not None:
+        kwargs["extra"] = (
+            extra_settings
         )
 
     if kwargs:
@@ -827,6 +879,42 @@ def chat_stream_api():
             400,
         )
 
+    stored_web_mode = (
+        (
+            user_settings.get(
+                "extra",
+                {},
+            )
+            or {}
+        ).get(
+            "web_mode",
+            DEFAULT_WEB_MODE,
+        )
+    )
+
+    web_mode = (
+        payload.get(
+            "web_mode"
+        )
+        or stored_web_mode
+        or DEFAULT_WEB_MODE
+    )
+
+    web_mode = (
+        str(web_mode)
+        .lower()
+        .strip()
+    )
+
+    if web_mode not in VALID_WEB_MODES:
+        return (
+            jsonify({
+                "error":
+                    "invalid_web_mode"
+            }),
+            400,
+        )
+
     include_thinking = bool(
         user_settings.get(
             "show_thinking",
@@ -855,6 +943,8 @@ def chat_stream_api():
                 include_thinking,
             attachments=
                 attachments,
+            web_mode=
+                web_mode,
         ):
             yield _ndjson(
                 event

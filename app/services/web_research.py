@@ -69,6 +69,174 @@ FETCH_PREFIXES = (
     "fetch:",
 )
 
+URL_RE = re.compile(
+    r"https?://[^\s<>()\[\]{}\"']+",
+    re.IGNORECASE,
+)
+
+# Auto mode is deliberately conservative. It only sends the current
+# user request to the web layer when the request clearly depends on
+# fresh/public information, or when the user explicitly includes a URL.
+AUTO_WEB_PATTERNS = (
+    re.compile(
+        r"\b(?:search|look up|lookup|find)\b.{0,24}\b(?:web|online|internet)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:latest|today|tonight|right now|currently|recent|recently|breaking|newest)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:news|headlines)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:update on|updates on|what happened with|what happened to)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bcurrent\s+(?:price|weather|temperature|score|status|version|release|rate|availability|schedule|standings|ceo|president)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:weather|forecast|air quality|stock price|share price|exchange rate|flight status|service status|outage|open now|hours today|live score|standings)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def normalize_web_mode(value):
+    mode = str(
+        value
+        or getattr(
+            config,
+            "DEFAULT_WEB_MODE",
+            "off",
+        )
+    ).strip().lower()
+
+    valid_modes = getattr(
+        config,
+        "VALID_WEB_MODES",
+        ("off", "auto", "always"),
+    )
+
+    if mode not in valid_modes:
+        return "off"
+
+    return mode
+
+
+def _first_public_url(text):
+    match = URL_RE.search(
+        str(text or "")
+    )
+
+    if not match:
+        return None
+
+    return match.group(0).rstrip(
+        ".,;:!?"
+    )
+
+
+def _auto_should_search(text):
+    value = str(text or "").strip()
+
+    if not value:
+        return False
+
+    return any(
+        pattern.search(value)
+        for pattern in AUTO_WEB_PATTERNS
+    )
+
+
+def resolve_web_request(
+    message,
+    preference=None,
+):
+    """
+    Resolve explicit commands and the per-user web mode.
+
+    Returns a dict with:
+        mode: search | fetch | None
+        user_message: text the assistant should answer
+        target: search text or URL used by the web tool
+        automatic: whether routing happened without /web or /fetch
+        reason: explicit | url | auto_freshness | always | off
+
+    Privacy boundary: this function only examines the current user
+    message. It never receives memory, conversation summaries, or
+    attachment/document contents.
+    """
+
+    explicit_mode, effective_message = (
+        parse_web_command(message)
+    )
+
+    if explicit_mode:
+        return {
+            "mode": explicit_mode,
+            "user_message": effective_message,
+            "target": effective_message,
+            "automatic": False,
+            "reason": "explicit",
+        }
+
+    text = str(message or "").strip()
+    mode = normalize_web_mode(
+        preference
+    )
+
+    if mode == "off":
+        return {
+            "mode": None,
+            "user_message": text,
+            "target": None,
+            "automatic": False,
+            "reason": "off",
+        }
+
+    url = _first_public_url(text)
+
+    # In Auto/Always, including a public URL is an explicit enough signal
+    # to read that page. Network-safety checks still happen in web_fetch.
+    if url:
+        return {
+            "mode": "fetch",
+            "user_message": text,
+            "target": url,
+            "automatic": True,
+            "reason": "url",
+        }
+
+    if mode == "always":
+        return {
+            "mode": "search",
+            "user_message": text,
+            "target": text,
+            "automatic": True,
+            "reason": "always",
+        }
+
+    if _auto_should_search(text):
+        return {
+            "mode": "search",
+            "user_message": text,
+            "target": text,
+            "automatic": True,
+            "reason": "auto_freshness",
+        }
+
+    return {
+        "mode": None,
+        "user_message": text,
+        "target": None,
+        "automatic": False,
+        "reason": "local",
+    }
+
 
 def parse_web_command(message):
     text = str(

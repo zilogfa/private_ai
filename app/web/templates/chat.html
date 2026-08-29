@@ -10,6 +10,7 @@
     id="chatApp"
     class="chat-shell"
     data-default-model="{{ settings.get('default_model_mode', 'auto') }}"
+    data-default-web-mode="{{ settings.get('extra', {}).get('web_mode', 'off') }}"
 >
     <div
         id="sidebarOverlay"
@@ -150,26 +151,49 @@
                 Private AI
             </div>
 
-            <label class="model-control">
-                <span class="sr-only">
-                    Model mode
-                </span>
+            <div class="header-controls">
+                <label class="web-control">
+                    <span class="sr-only">
+                        Web access mode
+                    </span>
 
-                <select id="modelSelect">
-                    <option value="auto">
-                        Auto
-                    </option>
-                    <option value="fast">
-                        Fast
-                    </option>
-                    <option value="default">
-                        Default
-                    </option>
-                    <option value="deep">
-                        Deep
-                    </option>
-                </select>
-            </label>
+                    <select
+                        id="webModeSelect"
+                        title="Web access: Off uses web only with /web or /fetch. Auto searches when fresh information is clearly needed. On searches every normal prompt."
+                    >
+                        <option value="off">
+                            Web off
+                        </option>
+                        <option value="auto">
+                            Web auto
+                        </option>
+                        <option value="always">
+                            Web on
+                        </option>
+                    </select>
+                </label>
+
+                <label class="model-control">
+                    <span class="sr-only">
+                        Model mode
+                    </span>
+
+                    <select id="modelSelect">
+                        <option value="auto">
+                            Auto
+                        </option>
+                        <option value="fast">
+                            Fast
+                        </option>
+                        <option value="default">
+                            Default
+                        </option>
+                        <option value="deep">
+                            Deep
+                        </option>
+                    </select>
+                </label>
+            </div>
         </header>
 
         <section
