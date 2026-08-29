@@ -105,6 +105,49 @@ SHOW_SUMMARY_ACTIVITY = True
 
 
 # =========================================================
+# WEB TOOLS
+# =========================================================
+
+WEB_SEARCH_PROVIDER = os.environ.get(
+    "PRIVATE_AI_WEB_SEARCH_PROVIDER",
+    "searxng",
+).strip().lower()
+
+SEARXNG_BASE_URL = os.environ.get(
+    "PRIVATE_AI_SEARXNG_URL",
+    "http://127.0.0.1:8888",
+).rstrip("/")
+
+WEB_QUERY_MODEL = FAST_MODEL
+
+WEB_SEARCH_RESULT_LIMIT = 6
+
+WEB_FETCH_RESULT_LIMIT = 3
+
+WEB_SEARCH_TIMEOUT_SECONDS = 15
+
+WEB_FETCH_TIMEOUT_SECONDS = 10
+
+WEB_FETCH_MAX_BYTES = (
+    2
+    * 1024
+    * 1024
+)
+
+WEB_FETCH_MAX_CHARS_PER_SOURCE = 5000
+
+WEB_TEXT_CONTEXT_BUDGET = 14000
+
+WEB_VISION_CONTEXT_BUDGET = 6000
+
+WEB_CONTEXT_SIZE = 8192
+
+WEB_SAFE_SEARCH = 1
+
+SHOW_WEB_ACTIVITY = True
+
+
+# =========================================================
 # WEB / FLASK
 # =========================================================
 

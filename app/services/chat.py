@@ -15,6 +15,7 @@ from app.router import (
 from app.database import (
     save_message,
     mark_memories_accessed,
+    user_has_permission,
 )
 
 from app.memory import (
@@ -49,6 +50,21 @@ from app.services.vision import (
     build_vision_messages,
     list_image_attachments,
     stream_vision_chat,
+)
+
+from app.services.web_research import (
+    SHOW_WEB_ACTIVITY,
+    WEB_CONTEXT_SIZE,
+    WEB_TEXT_CONTEXT_BUDGET,
+    WEB_VISION_CONTEXT_BUDGET,
+    WebResearchError,
+    build_private_search_query,
+    build_web_context,
+    format_sources_markdown,
+    parse_web_command,
+    research_direct_url,
+    research_search_query,
+    sources_event_data,
 )
 
 
@@ -170,7 +186,7 @@ def build_chat_context(
 
 
 # =========================================================
-# DOCUMENT CONTEXT INSERTION
+# CONTEXT HELPERS
 # =========================================================
 
 def _insert_context_before_latest_user(
@@ -207,6 +223,48 @@ def _insert_context_before_latest_user(
     return messages
 
 
+def _replace_latest_user_content(
+    messages,
+    content,
+):
+    for index in range(
+        len(messages) - 1,
+        -1,
+        -1,
+    ):
+        if (
+            messages[index].get(
+                "role"
+            )
+            == "user"
+        ):
+            updated = dict(
+                messages[index]
+            )
+
+            updated["content"] = (
+                content
+            )
+
+            messages[index] = updated
+            break
+
+    return messages
+
+
+def _combine_contexts(*contexts):
+    parts = [
+        str(context).strip()
+        for context in contexts
+        if str(context or "").strip()
+    ]
+
+    if not parts:
+        return None
+
+    return "\n\n".join(parts)
+
+
 # =========================================================
 # STREAM CHAT
 # =========================================================
@@ -225,14 +283,19 @@ def stream_chat(
     Web requests should pass model_mode explicitly.
     Terminal requests may leave it as None.
 
-    Current attachment routing:
+    Current attachment/tool routing:
         image -> local VLM
         DOCX/TXT/MD/CSV/JSON -> local text extraction
         text PDF -> local text extraction
         scanned/low-text PDF pages -> local VLM
+        /web <query> -> local SearXNG + native page fetch
+        /fetch <url> -> native public webpage fetch
 
     Standard event families:
         status
+        activity
+        tool
+        sources
         route
         thinking
         content
@@ -244,6 +307,37 @@ def stream_chat(
     attachments = list(
         attachments or []
     )
+
+    try:
+        web_mode, effective_user_message = (
+            parse_web_command(
+                user_message
+            )
+        )
+
+    except WebResearchError as error:
+        yield {
+            "type": "error",
+            "kind": "web_command",
+            "message": str(error),
+        }
+        return
+
+    if (
+        web_mode
+        and not user_has_permission(
+            user_id,
+            "web_search.use",
+        )
+    ):
+        yield {
+            "type": "error",
+            "kind": "permission",
+            "message": (
+                "This account does not have web search permission."
+            ),
+        }
+        return
 
     image_attachments = (
         list_image_attachments(
@@ -305,8 +399,16 @@ def stream_chat(
     messages = build_chat_context(
         user_id,
         conversation_id,
-        user_message,
+        effective_user_message,
     )
+
+    if web_mode:
+        messages = (
+            _replace_latest_user_content(
+                messages,
+                effective_user_message,
+            )
+        )
 
     # -----------------------------------------------------
     # Document extraction / scanned PDF rendering
@@ -368,6 +470,131 @@ def stream_chat(
         )
 
     # -----------------------------------------------------
+    # Explicit web tools
+    # -----------------------------------------------------
+
+    web_research = None
+    web_context = None
+
+    if web_mode:
+        try:
+            if web_mode == "search":
+                search_query = (
+                    build_private_search_query(
+                        effective_user_message
+                    )
+                )
+
+                if SHOW_WEB_ACTIVITY:
+                    yield {
+                        "type": "activity",
+                        "phase": "searching",
+                        "label": "Searching web...",
+                        "detail": search_query,
+                    }
+
+                yield {
+                    "type": "tool",
+                    "tool": "web.search",
+                    "state": "start",
+                    "query": search_query,
+                }
+
+                web_research = (
+                    research_search_query(
+                        search_query
+                    )
+                )
+
+                yield {
+                    "type": "tool",
+                    "tool": "web.search",
+                    "state": "done",
+                    "query": search_query,
+                    "result_count": len(
+                        web_research.get(
+                            "sources"
+                        )
+                        or []
+                    ),
+                }
+
+            else:
+                if SHOW_WEB_ACTIVITY:
+                    yield {
+                        "type": "activity",
+                        "phase": "reading",
+                        "label": "Reading source...",
+                        "detail": effective_user_message,
+                    }
+
+                yield {
+                    "type": "tool",
+                    "tool": "web.fetch",
+                    "state": "start",
+                    "url": effective_user_message,
+                }
+
+                web_research = (
+                    research_direct_url(
+                        effective_user_message
+                    )
+                )
+
+                yield {
+                    "type": "tool",
+                    "tool": "web.fetch",
+                    "state": "done",
+                    "url": (
+                        web_research
+                        .get("query")
+                    ),
+                }
+
+            if SHOW_WEB_ACTIVITY:
+                yield {
+                    "type": "activity",
+                    "phase": "reading",
+                    "label": "Reading sources...",
+                    "detail": (
+                        f"{len(web_research.get('sources') or [])} source(s)"
+                    ),
+                }
+
+            yield {
+                "type": "sources",
+                "items": sources_event_data(
+                    web_research
+                ),
+            }
+
+            web_context = (
+                build_web_context(
+                    web_research,
+                    max_chars=(
+                        WEB_VISION_CONTEXT_BUDGET
+                        if using_vision
+                        else WEB_TEXT_CONTEXT_BUDGET
+                    ),
+                )
+            )
+
+        except WebResearchError as error:
+            yield {
+                "type": "error",
+                "kind": "web_research",
+                "message": str(error),
+            }
+            return
+
+    combined_context = (
+        _combine_contexts(
+            document_context,
+            web_context,
+        )
+    )
+
+    # -----------------------------------------------------
     # Model routing
     # -----------------------------------------------------
 
@@ -384,7 +611,7 @@ def stream_chat(
     else:
         selected_mode, selected_model = (
             route_model(
-                user_message,
+                effective_user_message,
                 mode=model_mode,
             )
         )
@@ -444,7 +671,7 @@ def stream_chat(
                     extra_images=
                         document_vision_images,
                     additional_context=
-                        document_context,
+                        combined_context,
                 )
             )
 
@@ -464,11 +691,11 @@ def stream_chat(
         )
 
     else:
-        if document_context:
+        if combined_context:
             messages = (
                 _insert_context_before_latest_user(
                     messages,
-                    document_context,
+                    combined_context,
                 )
             )
 
@@ -480,10 +707,26 @@ def stream_chat(
 
         options = None
 
-        if document_attachments:
+        if (
+            document_attachments
+            or web_mode
+        ):
+            context_size = max(
+                (
+                    DOCUMENT_CONTEXT_SIZE
+                    if document_attachments
+                    else 0
+                ),
+                (
+                    WEB_CONTEXT_SIZE
+                    if web_mode
+                    else 0
+                ),
+            )
+
             options = {
                 "num_ctx":
-                    DOCUMENT_CONTEXT_SIZE,
+                    context_size,
             }
 
         generation_stream = (
@@ -574,6 +817,17 @@ def stream_chat(
                 }
 
         # -------------------------------------------------
+        # Deterministic persisted source links
+        # -------------------------------------------------
+
+        if web_research:
+            full_response += (
+                format_sources_markdown(
+                    web_research
+                )
+            )
+
+        # -------------------------------------------------
         # Save assistant response
         # -------------------------------------------------
 
@@ -603,7 +857,7 @@ def stream_chat(
 
         process_automatic_memory(
             user_id,
-            user_message,
+            effective_user_message,
         )
 
         # -------------------------------------------------
