@@ -98,6 +98,36 @@ _TOOL_REGISTRY = {
         requires_network=False,
         sends_query_off_device=False,
     ),
+    "agent.run": ToolSpec(
+        name="agent.run",
+        capability="agent.use",
+        description=(
+            "Run a persistent iterative local agent with a step budget, "
+            "pause/resume state, sources, evidence, and a private workspace."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
+    "agent.workspace.write": ToolSpec(
+        name="agent.workspace.write",
+        capability="agent.use",
+        description=(
+            "Create inert text, data, HTML, or source-code artifacts inside "
+            "one agent run's isolated local workspace."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
+    "agent.input.request": ToolSpec(
+        name="agent.input.request",
+        capability="agent.use",
+        description=(
+            "Pause an agent run at a real decision point and resume the same "
+            "run after the user provides additional input."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
 }
 
 

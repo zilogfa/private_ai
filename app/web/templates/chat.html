@@ -74,6 +74,16 @@
         </nav>
 
         <div class="sidebar-footer">
+            {% if can_agent %}
+            <a
+                href="{{ url_for('agent_web.agents_page') }}"
+                class="sidebar-link"
+            >
+                <span>✦</span>
+                Agent workspace
+            </a>
+            {% endif %}
+
             <a
                 href="{{ url_for('automation_web.automations_page') }}"
                 class="sidebar-link"

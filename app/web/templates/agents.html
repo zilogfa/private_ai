@@ -1,0 +1,296 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Workspace · Private AI{% endblock %}
+{% block body_class %}agent-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
+
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/agents.css') }}"
+>
+{% endblock %}
+
+{% block content %}
+<main
+    id="agentApp"
+    class="agent-page"
+    data-can-web="{{ '1' if can_web else '0' }}"
+    data-can-memory="{{ '1' if can_memory else '0' }}"
+>
+    <header class="agent-header">
+        <div>
+            <a
+                href="{{ url_for('web.chat') }}"
+                class="agent-back-link"
+            >
+                ← Back to chat
+            </a>
+
+            <div class="agent-title-row">
+                <div class="brand-mark small">P</div>
+                <div>
+                    <h1>Agent Workspace</h1>
+                    <p>
+                        Persistent, iterative research and artifact runs.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div
+            id="agentEngineStatus"
+            class="agent-engine-status"
+            aria-live="polite"
+        >
+            Checking workspace...
+        </div>
+    </header>
+
+    <div
+        id="agentNotice"
+        class="agent-notice"
+        hidden
+        aria-live="polite"
+    ></div>
+
+    <section class="agent-top-grid">
+        <section class="agent-card create-agent-card">
+            <div class="card-heading-row">
+                <div>
+                    <h2>Start an agent run</h2>
+                    <p>
+                        Give Private AI a goal. The agent can iterate across
+                        allowed tools instead of stopping after one answer.
+                    </p>
+                </div>
+            </div>
+
+            <form id="agentForm" class="agent-form">
+                <div class="form-grid two-column">
+                    <label>
+                        Name
+                        <input
+                            id="agentTitle"
+                            type="text"
+                            maxlength="120"
+                            placeholder="Washington land research"
+                        >
+                    </label>
+
+                    <label>
+                        Model
+                        <select id="agentModelMode">
+                            <option value="auto">Auto (8B controller)</option>
+                            <option value="fast">Fast (4B)</option>
+                            <option value="default">Default (8B)</option>
+                            <option value="deep">Deep (14B)</option>
+                        </select>
+                    </label>
+                </div>
+
+                <label>
+                    Goal
+                    <textarea
+                        id="agentGoal"
+                        rows="6"
+                        maxlength="8000"
+                        placeholder="Example: Find promising buildable land within 100 miles of ZIP 98040, over 1 acre and under $100,000. Research missing criteria instead of rejecting a candidate just because one listing does not explicitly state buildability. Rank confirmed and unverified candidates separately with sources."
+                        required
+                    ></textarea>
+                </label>
+
+                <div class="form-grid two-column agent-options-grid">
+                    <label>
+                        Step budget
+                        <select id="agentMaxSteps">
+                            <option value="4">4 steps · quick</option>
+                            <option value="6" selected>6 steps · standard</option>
+                            <option value="8">8 steps · deeper</option>
+                            <option value="10">10 steps · maximum</option>
+                        </select>
+                    </label>
+
+                    <div class="agent-tool-stack">
+                        <label class="agent-check-row">
+                            <input
+                                id="agentAllowWeb"
+                                type="checkbox"
+                                {% if not can_web %}disabled{% endif %}
+                            >
+                            <span>Allow public web research</span>
+                        </label>
+
+                        <label class="agent-check-row">
+                            <input
+                                id="agentAllowRag"
+                                type="checkbox"
+                            >
+                            <span>Allow indexed document search</span>
+                        </label>
+
+                        <label class="agent-check-row">
+                            <input
+                                id="agentAllowMemory"
+                                type="checkbox"
+                                {% if not can_memory %}disabled{% endif %}
+                            >
+                            <span>Allow relevant personal memory</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="agent-foundation-note">
+                    <strong>v1.9 safety boundary</strong>
+                    <span>
+                        Each run gets its own local workspace. Agents can create
+                        text, report, data, HTML and source-code files, but they
+                        cannot execute arbitrary host code yet. Web is opt-in.
+                        Private memory and RAG text are never used to construct
+                        public web queries.
+                    </span>
+                </div>
+
+                <div class="form-actions">
+                    <button
+                        id="startAgentButton"
+                        type="submit"
+                        class="primary-button"
+                    >
+                        Start agent
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <section class="agent-card agent-runs-card">
+            <div class="card-heading-row">
+                <div>
+                    <h2>Agent runs</h2>
+                    <p>
+                        Runs keep their steps, sources, workspace and state.
+                    </p>
+                </div>
+
+                <button
+                    id="refreshAgentRunsButton"
+                    class="secondary-button compact-button"
+                    type="button"
+                >
+                    Refresh
+                </button>
+            </div>
+
+            <div
+                id="agentRunList"
+                class="agent-run-list"
+            >
+                <div class="agent-empty">Loading runs...</div>
+            </div>
+        </section>
+    </section>
+
+    <section
+        id="agentDetailCard"
+        class="agent-card agent-detail-card"
+        hidden
+    >
+        <div class="agent-detail-header">
+            <div>
+                <div class="agent-detail-title-row">
+                    <h2 id="agentDetailTitle">Agent run</h2>
+                    <span
+                        id="agentDetailState"
+                        class="agent-state-pill"
+                    ></span>
+                </div>
+                <p id="agentDetailMeta"></p>
+            </div>
+
+            <div id="agentDetailActions" class="agent-detail-actions"></div>
+        </div>
+
+        <div class="agent-detail-layout">
+            <div class="agent-detail-main">
+                <section class="agent-detail-section">
+                    <h3>Goal</h3>
+                    <div
+                        id="agentDetailGoal"
+                        class="agent-text-block"
+                    ></div>
+                </section>
+
+                <section
+                    id="agentQuestionSection"
+                    class="agent-detail-section agent-question-section"
+                    hidden
+                >
+                    <h3>Agent needs your input</h3>
+                    <div
+                        id="agentPendingQuestion"
+                        class="agent-question"
+                    ></div>
+                    <form id="agentInputForm" class="agent-input-form">
+                        <textarea
+                            id="agentInputText"
+                            rows="3"
+                            maxlength="6000"
+                            placeholder="Answer the agent and continue this same run..."
+                            required
+                        ></textarea>
+                        <button
+                            class="primary-button"
+                            type="submit"
+                        >
+                            Continue run
+                        </button>
+                    </form>
+                </section>
+
+                <section class="agent-detail-section">
+                    <h3>Result</h3>
+                    <div
+                        id="agentResult"
+                        class="agent-result"
+                    >
+                        Agent has not produced a final result yet.
+                    </div>
+                </section>
+
+                <section class="agent-detail-section">
+                    <div class="section-heading-row">
+                        <h3>Steps</h3>
+                        <small id="agentStepCount"></small>
+                    </div>
+                    <div id="agentStepList" class="agent-step-list"></div>
+                </section>
+            </div>
+
+            <aside class="agent-detail-side">
+                <section class="agent-detail-section compact-section">
+                    <h3>Evidence</h3>
+                    <div id="agentEvidenceList" class="agent-evidence-list"></div>
+                </section>
+
+                <section class="agent-detail-section compact-section">
+                    <h3>Sources</h3>
+                    <div id="agentSourceList" class="agent-source-list"></div>
+                </section>
+
+                <section class="agent-detail-section compact-section">
+                    <h3>Artifacts</h3>
+                    <div id="agentArtifactList" class="agent-artifact-list"></div>
+                </section>
+            </aside>
+        </div>
+    </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/agents.js') }}"
+    defer
+></script>
+{% endblock %}

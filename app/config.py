@@ -360,6 +360,59 @@ SHOW_IMAGE_GENERATION_ACTIVITY = True
 
 
 # =========================================================
+# AGENT WORKSPACE
+# =========================================================
+
+# v1.9 gives each agent run a filesystem-isolated workspace under generated/.
+# Arbitrary host code execution is intentionally NOT enabled yet. Agents can
+# create inert text/code artifacts for inspection and later execution layers.
+AGENT_WORKSPACE_DIR = (
+    GENERATED_DIR
+    / "agent_workspaces"
+)
+
+AGENT_DEFAULT_MAX_STEPS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_DEFAULT_STEPS",
+        "6",
+    )
+)
+
+AGENT_MAX_STEPS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MAX_STEPS",
+        "10",
+    )
+)
+
+AGENT_DEFAULT_MAX_STEPS = max(
+    2,
+    min(AGENT_MAX_STEPS, AGENT_DEFAULT_MAX_STEPS),
+)
+
+AGENT_MAX_ARTIFACTS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MAX_ARTIFACTS",
+        "6",
+    )
+)
+
+AGENT_MAX_ARTIFACT_BYTES = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MAX_ARTIFACT_BYTES",
+        str(256 * 1024),
+    )
+)
+
+AGENT_MAX_RUNTIME_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MAX_RUNTIME_SECONDS",
+        "1200",
+    )
+)
+
+
+# =========================================================
 # WEB / FLASK
 # =========================================================
 

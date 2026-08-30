@@ -259,11 +259,19 @@ def chat():
         )
     )
 
+    can_agent = (
+        user_has_permission(
+            user[0],
+            "agent.use",
+        )
+    )
+
     return render_template(
         "chat.html",
         user=user,
         settings=settings,
         can_admin=can_admin,
+        can_agent=can_agent,
     )
 
 

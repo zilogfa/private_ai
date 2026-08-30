@@ -33,6 +33,11 @@ from app.services.notifications import (
     initialize_notification_storage,
 )
 
+from app.services.agents import (
+    initialize_agent_storage,
+    recover_stale_agent_runs,
+)
+
 
 def _load_or_create_secret_key():
     environment_key = (
@@ -111,6 +116,8 @@ def create_app():
     initialize_attachment_storage()
     initialize_automation_storage()
     initialize_notification_storage()
+    initialize_agent_storage()
+    recover_stale_agent_runs()
 
     app = Flask(
         __name__,
@@ -160,6 +167,10 @@ def create_app():
         automation_web_bp,
     )
 
+    from app.web.agent_routes import (
+        agent_web_bp,
+    )
+
     from app.api.routes import (
         api_bp,
     )
@@ -177,6 +188,10 @@ def create_app():
         automation_api_bp,
     )
 
+    from app.api.agent_routes import (
+        agent_api_bp,
+    )
+
     # The explicit /image interceptor is registered after auth/CSRF so it
     # participates in the same security boundary as the regular chat API.
     register_image_chat_interceptor(
@@ -189,6 +204,10 @@ def create_app():
 
     app.register_blueprint(
         automation_web_bp
+    )
+
+    app.register_blueprint(
+        agent_web_bp
     )
 
     app.register_blueprint(
@@ -205,6 +224,10 @@ def create_app():
 
     app.register_blueprint(
         automation_api_bp
+    )
+
+    app.register_blueprint(
+        agent_api_bp
     )
 
     @app.after_request
