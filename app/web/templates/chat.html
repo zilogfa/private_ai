@@ -5,6 +5,13 @@
 {% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
 {% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
 
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/chat-viewport-hotfix.css') }}"
+>
+{% endblock %}
+
 {% block content %}
 <div
     id="chatApp"
@@ -67,6 +74,14 @@
         </nav>
 
         <div class="sidebar-footer">
+            <a
+                href="{{ url_for('automation_web.automations_page') }}"
+                class="sidebar-link"
+            >
+                <span>◷</span>
+                Automations
+            </a>
+
             <a
                 href="{{ url_for('web.profile') }}"
                 class="sidebar-link"

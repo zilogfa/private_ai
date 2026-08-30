@@ -1,0 +1,126 @@
+/*
+ * Private AI v1.8 desktop viewport hotfix.
+ *
+ * Keep the chat composer and sidebar controls reachable when a desktop
+ * browser window becomes short. Mobile behavior is intentionally unchanged.
+ */
+
+@media (min-width: 761px) {
+    html,
+    body.chat-body {
+        height: 100%;
+        min-height: 0;
+    }
+
+    body.chat-body {
+        height: 100dvh;
+        max-height: 100dvh;
+        overflow: hidden;
+    }
+
+    .chat-shell {
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .sidebar {
+        min-height: 0;
+    }
+
+    .sidebar-top,
+    .sidebar-section-title {
+        flex: 0 0 auto;
+    }
+
+    .conversation-list {
+        flex: 1 1 0;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .sidebar-footer {
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: min(46vh, 360px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+    }
+
+    .chat-main {
+        height: 100%;
+        max-height: 100%;
+        min-height: 0;
+        overflow: hidden;
+        grid-template-rows:
+            auto
+            minmax(0, 1fr)
+            minmax(0, auto);
+    }
+
+    .messages {
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .composer-wrap {
+        position: relative;
+        z-index: 10;
+        min-height: 0;
+        max-height: min(46vh, 390px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        flex-shrink: 0;
+    }
+
+    .composer textarea {
+        max-height: min(180px, 24vh);
+    }
+}
+
+/* Compact only the desktop chrome when the browser is extremely short. */
+@media (min-width: 761px) and (max-height: 560px) {
+    .chat-header {
+        height: 48px;
+    }
+
+    .sidebar-top {
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
+    .new-chat-button {
+        margin-top: 6px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+    }
+
+    .sidebar-section-title {
+        padding-top: 5px;
+        padding-bottom: 5px;
+    }
+
+    .sidebar-link {
+        padding-top: 7px;
+        padding-bottom: 7px;
+    }
+
+    .sidebar-user {
+        margin-top: 4px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+    }
+
+    .composer-wrap {
+        padding-bottom: 8px;
+    }
+
+    .composer-caption {
+        display: none;
+    }
+}

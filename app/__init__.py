@@ -25,6 +25,14 @@ from app.services.attachments import (
     initialize_attachment_storage,
 )
 
+from app.services.automation_store import (
+    initialize_automation_storage,
+)
+
+from app.services.notifications import (
+    initialize_notification_storage,
+)
+
 
 def _load_or_create_secret_key():
     environment_key = (
@@ -101,6 +109,8 @@ def create_app():
     )
 
     initialize_attachment_storage()
+    initialize_automation_storage()
+    initialize_notification_storage()
 
     app = Flask(
         __name__,
@@ -146,6 +156,10 @@ def create_app():
         web_bp,
     )
 
+    from app.web.automation_routes import (
+        automation_web_bp,
+    )
+
     from app.api.routes import (
         api_bp,
     )
@@ -159,6 +173,10 @@ def create_app():
         register_image_chat_interceptor,
     )
 
+    from app.api.automation_routes import (
+        automation_api_bp,
+    )
+
     # The explicit /image interceptor is registered after auth/CSRF so it
     # participates in the same security boundary as the regular chat API.
     register_image_chat_interceptor(
@@ -167,6 +185,10 @@ def create_app():
 
     app.register_blueprint(
         web_bp
+    )
+
+    app.register_blueprint(
+        automation_web_bp
     )
 
     app.register_blueprint(
@@ -179,6 +201,10 @@ def create_app():
 
     app.register_blueprint(
         image_api_bp
+    )
+
+    app.register_blueprint(
+        automation_api_bp
     )
 
     @app.after_request
@@ -208,5 +234,14 @@ def create_app():
         )
 
         return response
+
+    # Start only after the application and all database foundations exist.
+    # The scheduler is a daemon thread and claims tasks atomically in SQLite,
+    # so a process restart can safely resume due work.
+    from app.services.automation_engine import (
+        start_automation_engine,
+    )
+
+    start_automation_engine()
 
     return app

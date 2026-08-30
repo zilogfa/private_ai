@@ -1,0 +1,498 @@
+{% extends "base.html" %}
+
+{% block title %}Automations · Private AI{% endblock %}
+{% block body_class %}automation-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
+
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/automations.css') }}"
+>
+{% endblock %}
+
+{% block content %}
+<main
+    id="automationApp"
+    class="automation-page"
+    data-can-web="{{ '1' if can_web else '0' }}"
+>
+    <header class="automation-header">
+        <div>
+            <a
+                href="{{ url_for('web.chat') }}"
+                class="automation-back-link"
+            >
+                ← Back to chat
+            </a>
+
+            <div class="automation-title-row">
+                <div class="brand-mark small">P</div>
+                <div>
+                    <h1>Automations</h1>
+                    <p>
+                        Persistent reminders, scheduled AI work,
+                        and conditional checks.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div
+            id="engineStatus"
+            class="engine-status"
+            aria-live="polite"
+        >
+            Checking engine...
+        </div>
+    </header>
+
+    <div
+        id="automationNotice"
+        class="automation-notice"
+        hidden
+        aria-live="polite"
+    ></div>
+
+    <section class="automation-layout">
+        <div class="automation-main-column">
+            <section class="automation-card">
+                <div class="card-heading-row">
+                    <div>
+                        <h2 id="taskFormTitle">Create automation</h2>
+                        <p>
+                            Tasks are stored locally and survive app restarts.
+                        </p>
+                    </div>
+                </div>
+
+                <form
+                    id="automationForm"
+                    class="automation-form"
+                >
+                    <input
+                        id="editingTaskId"
+                        type="hidden"
+                        value=""
+                    >
+                    <input
+                        id="taskTimezone"
+                        type="hidden"
+                        value="UTC"
+                    >
+
+                    <div class="form-grid two-column">
+                        <label>
+                            Name
+                            <input
+                                id="taskTitle"
+                                type="text"
+                                maxlength="120"
+                                placeholder="Morning market brief"
+                                required
+                            >
+                        </label>
+
+                        <label>
+                            Type
+                            <select id="taskType">
+                                <option value="reminder">
+                                    Reminder
+                                </option>
+                                <option value="ai">
+                                    Scheduled AI task
+                                </option>
+                                <option value="condition">
+                                    Conditional check
+                                </option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <label>
+                        Instruction
+                        <textarea
+                            id="taskInstruction"
+                            rows="4"
+                            maxlength="6000"
+                            placeholder="What should Private AI do when this task runs?"
+                            required
+                        ></textarea>
+                    </label>
+
+                    <label
+                        id="conditionField"
+                        hidden
+                    >
+                        Notify me when
+                        <textarea
+                            id="conditionText"
+                            rows="3"
+                            maxlength="3000"
+                            placeholder="Example: There is a meaningful new development since the previous check."
+                        ></textarea>
+                    </label>
+
+                    <fieldset class="automation-fieldset">
+                        <legend>Schedule</legend>
+
+                        <div class="form-grid two-column">
+                            <label>
+                                Schedule type
+                                <select id="scheduleKind">
+                                    <option value="once">
+                                        One time
+                                    </option>
+                                    <option value="interval">
+                                        Every N minutes / hours
+                                    </option>
+                                    <option value="daily">
+                                        Daily
+                                    </option>
+                                    <option value="weekly">
+                                        Weekly
+                                    </option>
+                                </select>
+                            </label>
+
+                            <div class="timezone-display">
+                                <span>Timezone</span>
+                                <strong id="timezoneLabel">UTC</strong>
+                            </div>
+                        </div>
+
+                        <div id="scheduleOnce" class="schedule-panel">
+                            <label>
+                                Run at
+                                <input
+                                    id="onceRunAt"
+                                    type="datetime-local"
+                                >
+                            </label>
+                        </div>
+
+                        <div
+                            id="scheduleInterval"
+                            class="schedule-panel form-grid three-column"
+                            hidden
+                        >
+                            <label>
+                                Every
+                                <input
+                                    id="intervalEvery"
+                                    type="number"
+                                    min="1"
+                                    max="10080"
+                                    value="1"
+                                >
+                            </label>
+
+                            <label>
+                                Unit
+                                <select id="intervalUnit">
+                                    <option value="minutes">
+                                        Minutes
+                                    </option>
+                                    <option value="hours">
+                                        Hours
+                                    </option>
+                                </select>
+                            </label>
+
+                            <label>
+                                First run
+                                <input
+                                    id="intervalFirstRun"
+                                    type="datetime-local"
+                                >
+                            </label>
+                        </div>
+
+                        <div
+                            id="scheduleDaily"
+                            class="schedule-panel form-grid two-column"
+                            hidden
+                        >
+                            <label>
+                                Every N days
+                                <input
+                                    id="dailyEvery"
+                                    type="number"
+                                    min="1"
+                                    max="30"
+                                    value="1"
+                                >
+                            </label>
+
+                            <label>
+                                Time
+                                <input
+                                    id="dailyTime"
+                                    type="time"
+                                    value="08:00"
+                                >
+                            </label>
+                        </div>
+
+                        <div
+                            id="scheduleWeekly"
+                            class="schedule-panel form-grid three-column"
+                            hidden
+                        >
+                            <label>
+                                Every N weeks
+                                <input
+                                    id="weeklyEvery"
+                                    type="number"
+                                    min="1"
+                                    max="12"
+                                    value="1"
+                                >
+                            </label>
+
+                            <label>
+                                Day
+                                <select id="weeklyDay">
+                                    <option value="0">Monday</option>
+                                    <option value="1">Tuesday</option>
+                                    <option value="2">Wednesday</option>
+                                    <option value="3">Thursday</option>
+                                    <option value="4">Friday</option>
+                                    <option value="5">Saturday</option>
+                                    <option value="6">Sunday</option>
+                                </select>
+                            </label>
+
+                            <label>
+                                Time
+                                <input
+                                    id="weeklyTime"
+                                    type="time"
+                                    value="08:00"
+                                >
+                            </label>
+                        </div>
+                    </fieldset>
+
+                    <fieldset
+                        id="aiOptions"
+                        class="automation-fieldset"
+                        hidden
+                    >
+                        <legend>AI & tools</legend>
+
+                        <div class="form-grid two-column">
+                            <label>
+                                Model mode
+                                <select id="taskModelMode">
+                                    <option value="auto">Auto (8B safe)</option>
+                                    <option value="fast">Fast (4B)</option>
+                                    <option value="default">Default (8B)</option>
+                                    <option value="deep">Deep (14B)</option>
+                                </select>
+                            </label>
+
+                            <div class="tool-toggle-stack">
+                                <label class="automation-check-row">
+                                    <input
+                                        id="allowRag"
+                                        type="checkbox"
+                                    >
+                                    <span>
+                                        Allow indexed document search when useful
+                                    </span>
+                                </label>
+
+                                <label class="automation-check-row">
+                                    <input
+                                        id="allowMemory"
+                                        type="checkbox"
+                                    >
+                                    <span>
+                                        Allow personal memory when useful
+                                    </span>
+                                </label>
+
+                                <label class="automation-check-row">
+                                    <input
+                                        id="allowWeb"
+                                        type="checkbox"
+                                        {% if not can_web %}disabled{% endif %}
+                                    >
+                                    <span>
+                                        Allow public web search when needed
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <p class="privacy-note">
+                            Web access is opt-in per task. Only the task instruction
+                            is converted into a public search query; private memory
+                            and document text are not sent to the search provider.
+                        </p>
+
+                        <label
+                            id="notifyChangeField"
+                            class="automation-check-row"
+                            hidden
+                        >
+                            <input
+                                id="notifyOnChange"
+                                type="checkbox"
+                                checked
+                            >
+                            <span>
+                                Notify only when the matched condition changes
+                            </span>
+                        </label>
+                    </fieldset>
+
+                    <section
+                        id="preflightPanel"
+                        class="automation-preflight"
+                        hidden
+                        aria-live="polite"
+                    >
+                        <div class="preflight-heading">
+                            <div>
+                                <strong>Task review</strong>
+                                <span id="preflightStatus" class="automation-tag">Ready</span>
+                            </div>
+                            <small id="preflightModel"></small>
+                        </div>
+
+                        <p id="preflightSummary"></p>
+                        <p
+                            id="preflightClarification"
+                            class="preflight-clarification"
+                            hidden
+                        ></p>
+
+                        <div id="preflightTools" class="preflight-tools"></div>
+
+                        <button
+                            id="applyRecommendedToolsButton"
+                            type="button"
+                            class="secondary-button compact-button"
+                            hidden
+                        >
+                            Apply recommended tools
+                        </button>
+                    </section>
+
+                    <div class="form-actions">
+                        <button
+                            id="reviewTaskButton"
+                            type="button"
+                            class="secondary-button"
+                        >
+                            Review task
+                        </button>
+
+                        <button
+                            id="saveTaskButton"
+                            type="submit"
+                            class="primary-button"
+                        >
+                            Create automation
+                        </button>
+
+                        <button
+                            id="cancelEditButton"
+                            type="button"
+                            class="secondary-button"
+                            hidden
+                        >
+                            Cancel edit
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <section class="automation-card">
+                <div class="card-heading-row">
+                    <div>
+                        <h2>Your automations</h2>
+                        <p>
+                            Run now, pause, edit, or inspect recent state.
+                        </p>
+                    </div>
+
+                    <button
+                        id="refreshTasksButton"
+                        class="secondary-button compact-button"
+                        type="button"
+                    >
+                        Refresh
+                    </button>
+                </div>
+
+                <div
+                    id="taskList"
+                    class="task-list"
+                >
+                    <div class="automation-empty">
+                        Loading tasks...
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <aside class="automation-side-column">
+            <section class="automation-card sticky-card">
+                <div class="card-heading-row">
+                    <div>
+                        <h2>Notifications</h2>
+                        <p id="notificationCount">
+                            Loading...
+                        </p>
+                    </div>
+
+                    <button
+                        id="markAllReadButton"
+                        class="secondary-button compact-button"
+                        type="button"
+                    >
+                        Mark all read
+                    </button>
+                </div>
+
+                <div
+                    id="notificationList"
+                    class="notification-list"
+                ></div>
+            </section>
+        </aside>
+    </section>
+
+    <section class="automation-card automation-runs-card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Run history</h2>
+                <p>
+                    Every execution is logged with status, result,
+                    tools used, and failures.
+                </p>
+            </div>
+        </div>
+
+        <div
+            id="runList"
+            class="run-list"
+        >
+            <div class="automation-empty">
+                Loading run history...
+            </div>
+        </div>
+    </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/automations.js') }}"
+    defer
+></script>
+{% endblock %}

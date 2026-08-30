@@ -70,6 +70,34 @@ _TOOL_REGISTRY = {
         requires_network=False,
         sends_query_off_device=False,
     ),
+    "automation.schedule": ToolSpec(
+        name="automation.schedule",
+        capability="automation.use",
+        description=(
+            "Create, edit, pause, resume, and schedule persistent personal "
+            "automation tasks."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
+    "automation.execute": ToolSpec(
+        name="automation.execute",
+        capability="automation.use",
+        description=(
+            "Execute a scheduled reminder, local AI task, or conditional check."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
+    "notification.in_app": ToolSpec(
+        name="notification.in_app",
+        capability="automation.use",
+        description=(
+            "Deliver an automation result to the local in-app notification inbox."
+        ),
+        requires_network=False,
+        sends_query_off_device=False,
+    ),
 }
 
 
