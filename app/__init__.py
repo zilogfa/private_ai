@@ -192,6 +192,15 @@ def create_app():
         agent_api_bp,
     )
 
+    # v1.9.2 strengthens the existing persistent agent runner without
+    # replacing its state/storage engine. Apply after agent modules are
+    # importable and before any new agent run executes.
+    from app.services.agent_research_upgrade import (
+        apply_agent_research_upgrade,
+    )
+
+    apply_agent_research_upgrade()
+
     # The explicit /image interceptor is registered after auth/CSRF so it
     # participates in the same security boundary as the regular chat API.
     register_image_chat_interceptor(
