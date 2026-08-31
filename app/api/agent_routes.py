@@ -1,19 +1,8 @@
-from flask import (
-    Blueprint,
-    jsonify,
-    request,
-    send_file,
-)
+from flask import Blueprint, jsonify, request, send_file
 
-from app.auth import (
-    get_current_user_id,
-    permission_required,
-)
+from app.auth import get_current_user_id, permission_required
 from app.database import user_has_permission
-from app.services.agent_engine import (
-    agent_engine_status,
-    start_agent_run,
-)
+from app.services.agent_engine import agent_engine_status, start_agent_run
 from app.services.agents import (
     AgentStoreError,
     add_agent_input,
@@ -32,14 +21,16 @@ from app.services.agents import (
     request_agent_cancel,
     request_agent_pause,
 )
+from app.services.agent_sandbox import (
+    AGENT_CODE_PERMISSION,
+    agent_run_allows_code,
+    list_agent_sandbox_executions,
+    sandbox_status,
+    set_agent_run_code_access,
+)
 from app.services.rag import has_indexed_documents
 
-
-agent_api_bp = Blueprint(
-    "agent_api",
-    __name__,
-    url_prefix="/api/agents",
-)
+agent_api_bp = Blueprint("agent_api", __name__, url_prefix="/api/agents")
 
 
 def _payload():
@@ -52,35 +43,46 @@ def _error(error, status=400):
 
 def _validate_capabilities(user_id, payload):
     if bool(payload.get("allow_web")) and not user_has_permission(
-        user_id,
-        "web_search.use",
+        user_id, "web_search.use"
     ):
-        raise AgentStoreError(
-            "This account does not have web-search permission."
-        )
+        raise AgentStoreError("This account does not have web-search permission.")
 
     if bool(payload.get("allow_memory")) and not user_has_permission(
-        user_id,
-        "memory.manage_self",
+        user_id, "memory.manage_self"
+    ):
+        raise AgentStoreError("This account does not have memory permission.")
+
+    if bool(payload.get("allow_code")) and not user_has_permission(
+        user_id, AGENT_CODE_PERMISSION
     ):
         raise AgentStoreError(
-            "This account does not have memory permission."
+            "This account does not have sandboxed code-execution permission."
         )
+
+
+def _decorate_run(user_id, run):
+    if not run:
+        return None
+    result = dict(run)
+    result["allow_code"] = agent_run_allows_code(user_id, run["id"])
+    return result
 
 
 def _run_detail(user_id, run_id):
     run = get_agent_run(user_id, run_id)
     if not run:
         return None
-
     return {
-        "run": run,
+        "run": _decorate_run(user_id, run),
         "steps": list_agent_steps(user_id, run_id),
         "sources": list_agent_sources(user_id, run_id),
         "document_sources": list_agent_document_sources(user_id, run_id),
         "evidence": list_agent_evidence(user_id, run_id),
         "artifacts": list_agent_artifacts(user_id, run_id),
         "inputs": list_agent_inputs(user_id, run_id),
+        "sandbox_executions": list_agent_sandbox_executions(
+            user_id, run_id, limit=30
+        ),
     }
 
 
@@ -88,14 +90,20 @@ def _run_detail(user_id, run_id):
 @permission_required("agent.use")
 def agent_status():
     user_id = get_current_user_id()
-    return jsonify({
-        "engine": agent_engine_status(),
-        "capabilities": {
-            "web": user_has_permission(user_id, "web_search.use"),
-            "rag": has_indexed_documents(user_id),
-            "memory": user_has_permission(user_id, "memory.manage_self"),
-        },
-    })
+    return jsonify(
+        {
+            "engine": agent_engine_status(),
+            "capabilities": {
+                "web": user_has_permission(user_id, "web_search.use"),
+                "rag": has_indexed_documents(user_id),
+                "memory": user_has_permission(user_id, "memory.manage_self"),
+                "code_execution": user_has_permission(
+                    user_id, AGENT_CODE_PERMISSION
+                ),
+            },
+            "sandbox": sandbox_status(),
+        }
+    )
 
 
 @agent_api_bp.get("/runs")
@@ -105,13 +113,15 @@ def agent_runs():
         limit = int(request.args.get("limit", 50))
     except ValueError:
         limit = 50
-
-    return jsonify({
-        "runs": list_agent_runs(
-            get_current_user_id(),
-            limit=limit,
-        )
-    })
+    user_id = get_current_user_id()
+    return jsonify(
+        {
+            "runs": [
+                _decorate_run(user_id, run)
+                for run in list_agent_runs(user_id, limit=limit)
+            ]
+        }
+    )
 
 
 @agent_api_bp.post("/runs")
@@ -119,10 +129,15 @@ def agent_runs():
 def create_run():
     user_id = get_current_user_id()
     payload = _payload()
-
     try:
         _validate_capabilities(user_id, payload)
         run = create_agent_run(user_id, payload)
+        set_agent_run_code_access(
+            user_id,
+            run["id"],
+            bool(payload.get("allow_code")),
+        )
+        run = _decorate_run(user_id, run)
     except AgentStoreError as error:
         return _error(error)
 
@@ -133,10 +148,7 @@ def create_run():
 @agent_api_bp.get("/runs/<run_id>")
 @permission_required("agent.use")
 def agent_run_detail(run_id):
-    detail = _run_detail(
-        get_current_user_id(),
-        run_id,
-    )
+    detail = _run_detail(get_current_user_id(), run_id)
     if not detail:
         return _error("Agent run was not found.", 404)
     return jsonify(detail)
@@ -150,7 +162,7 @@ def pause_run(run_id):
         run = request_agent_pause(user_id, run_id)
     except AgentStoreError as error:
         return _error(error)
-    return jsonify({"run": run}), 202
+    return jsonify({"run": _decorate_run(user_id, run)}), 202
 
 
 @agent_api_bp.post("/runs/<run_id>/cancel")
@@ -161,7 +173,7 @@ def cancel_run(run_id):
         run = request_agent_cancel(user_id, run_id)
     except AgentStoreError as error:
         return _error(error)
-    return jsonify({"run": run}), 202
+    return jsonify({"run": _decorate_run(user_id, run)}), 202
 
 
 @agent_api_bp.post("/runs/<run_id>/resume")
@@ -172,9 +184,8 @@ def resume_run(run_id):
         run = queue_agent_resume(user_id, run_id)
     except AgentStoreError as error:
         return _error(error)
-
     start_agent_run(user_id, run_id)
-    return jsonify({"run": run}), 202
+    return jsonify({"run": _decorate_run(user_id, run)}), 202
 
 
 @agent_api_bp.post("/runs/<run_id>/input")
@@ -182,16 +193,11 @@ def resume_run(run_id):
 def provide_agent_input(run_id):
     user_id = get_current_user_id()
     try:
-        run = add_agent_input(
-            user_id,
-            run_id,
-            _payload().get("content"),
-        )
+        run = add_agent_input(user_id, run_id, _payload().get("content"))
     except AgentStoreError as error:
         return _error(error)
-
     start_agent_run(user_id, run_id)
-    return jsonify({"run": run}), 202
+    return jsonify({"run": _decorate_run(user_id, run)}), 202
 
 
 @agent_api_bp.delete("/runs/<run_id>")
@@ -202,10 +208,8 @@ def delete_run(run_id):
         deleted = delete_agent_run(user_id, run_id)
     except AgentStoreError as error:
         return _error(error)
-
     if not deleted:
         return _error("Agent run was not found.", 404)
-
     return jsonify({"deleted": True, "run_id": run_id})
 
 
@@ -213,15 +217,14 @@ def delete_run(run_id):
 @permission_required("agent.use")
 def agent_artifact_content(artifact_id):
     artifact, path = get_agent_artifact_path(
-        get_current_user_id(),
-        artifact_id,
+        get_current_user_id(), artifact_id
     )
-
     if not artifact or not path:
         return _error("Agent artifact was not found.", 404)
 
-    # Always download artifacts in v1.9. HTML/JS/Python files are stored as
-    # inert text/code and never executed from the Private AI origin.
+    # Files remain inert downloads from the Private AI origin. The sandbox runs
+    # only explicit Python workspace files in Docker; HTML/JS/Python are never
+    # served as active same-origin applications.
     response = send_file(
         path,
         mimetype=artifact.get("mime_type") or "application/octet-stream",

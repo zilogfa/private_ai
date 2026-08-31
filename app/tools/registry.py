@@ -11,123 +11,21 @@ class ToolSpec:
 
 
 _TOOL_REGISTRY = {
-    "web.search": ToolSpec(
-        name="web.search",
-        capability="web_search.use",
-        description=(
-            "Discover public web pages through the configured "
-            "search provider."
-        ),
-        requires_network=True,
-        sends_query_off_device=True,
-    ),
-    "web.fetch": ToolSpec(
-        name="web.fetch",
-        capability="web_search.use",
-        description=(
-            "Fetch and extract readable text from a public URL."
-        ),
-        requires_network=True,
-        sends_query_off_device=False,
-    ),
-    "speech.stt": ToolSpec(
-        name="speech.stt",
-        capability="speech.use",
-        description=(
-            "Transcribe microphone audio into text using the local "
-            "speech-to-text provider."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "speech.tts": ToolSpec(
-        name="speech.tts",
-        capability="speech.use",
-        description=(
-            "Generate spoken audio from assistant text using the local "
-            "text-to-speech provider."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "document.index": ToolSpec(
-        name="document.index",
-        capability="chat.use",
-        description=(
-            "Index readable uploaded document text into the user's local "
-            "persistent RAG store."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "document.search": ToolSpec(
-        name="document.search",
-        capability="chat.use",
-        description=(
-            "Semantically retrieve relevant passages from the user's locally "
-            "indexed documents."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "automation.schedule": ToolSpec(
-        name="automation.schedule",
-        capability="automation.use",
-        description=(
-            "Create, edit, pause, resume, and schedule persistent personal "
-            "automation tasks."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "automation.execute": ToolSpec(
-        name="automation.execute",
-        capability="automation.use",
-        description=(
-            "Execute a scheduled reminder, local AI task, or conditional check."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "notification.in_app": ToolSpec(
-        name="notification.in_app",
-        capability="automation.use",
-        description=(
-            "Deliver an automation result to the local in-app notification inbox."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "agent.run": ToolSpec(
-        name="agent.run",
-        capability="agent.use",
-        description=(
-            "Run a persistent iterative local agent with a step budget, "
-            "pause/resume state, sources, evidence, and a private workspace."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "agent.workspace.write": ToolSpec(
-        name="agent.workspace.write",
-        capability="agent.use",
-        description=(
-            "Create inert text, data, HTML, or source-code artifacts inside "
-            "one agent run's isolated local workspace."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
-    "agent.input.request": ToolSpec(
-        name="agent.input.request",
-        capability="agent.use",
-        description=(
-            "Pause an agent run at a real decision point and resume the same "
-            "run after the user provides additional input."
-        ),
-        requires_network=False,
-        sends_query_off_device=False,
-    ),
+    "web.search": ToolSpec("web.search", "web_search.use", "Discover public web pages through the configured search provider.", True, True),
+    "web.fetch": ToolSpec("web.fetch", "web_search.use", "Fetch and extract readable text from a public URL.", True, False),
+    "speech.stt": ToolSpec("speech.stt", "speech.use", "Transcribe microphone audio into text using the local speech-to-text provider."),
+    "speech.tts": ToolSpec("speech.tts", "speech.use", "Generate spoken audio from assistant text using the local text-to-speech provider."),
+    "document.index": ToolSpec("document.index", "chat.use", "Index readable uploaded document text into the user's local persistent RAG store."),
+    "document.search": ToolSpec("document.search", "chat.use", "Semantically retrieve relevant passages from the user's locally indexed documents."),
+    "automation.schedule": ToolSpec("automation.schedule", "automation.use", "Create, edit, pause, resume, and schedule persistent personal automation tasks."),
+    "automation.execute": ToolSpec("automation.execute", "automation.use", "Execute a scheduled reminder, local AI task, or conditional check."),
+    "notification.in_app": ToolSpec("notification.in_app", "automation.use", "Deliver an automation result to the local in-app notification inbox."),
+    "agent.run": ToolSpec("agent.run", "agent.use", "Run a persistent iterative local agent with pause/resume state, sources, evidence, and a private workspace."),
+    "agent.workspace.write": ToolSpec("agent.workspace.write", "agent.use", "Create or revise text, data, HTML, or source-code files inside one agent run's local workspace."),
+    "agent.workspace.list": ToolSpec("agent.workspace.list", "agent.use", "List logical files in one agent run's private workspace."),
+    "agent.workspace.read": ToolSpec("agent.workspace.read", "agent.use", "Read one text/source file from one agent run's private workspace."),
+    "agent.sandbox.python": ToolSpec("agent.sandbox.python", "agent.code.execute", "Execute one Python workspace file inside a resource-limited, network-disabled Docker sandbox with a read-only workspace mount."),
+    "agent.input.request": ToolSpec("agent.input.request", "agent.use", "Pause an agent run at a real decision point and resume the same run after user input."),
 }
 
 

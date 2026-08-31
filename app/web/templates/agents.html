@@ -6,10 +6,7 @@
 {% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
 
 {% block head %}
-<link
-    rel="stylesheet"
-    href="{{ url_for('static', filename='css/agents.css') }}"
->
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agents.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -18,42 +15,25 @@
     class="agent-page"
     data-can-web="{{ '1' if can_web else '0' }}"
     data-can-memory="{{ '1' if can_memory else '0' }}"
+    data-can-code="{{ '1' if can_code else '0' }}"
 >
     <header class="agent-header">
         <div>
-            <a
-                href="{{ url_for('web.chat') }}"
-                class="agent-back-link"
-            >
-                ← Back to chat
-            </a>
-
+            <a href="{{ url_for('web.chat') }}" class="agent-back-link">← Back to chat</a>
             <div class="agent-title-row">
                 <div class="brand-mark small">P</div>
                 <div>
                     <h1>Agent Workspace</h1>
-                    <p>
-                        Persistent, iterative research and artifact runs.
-                    </p>
+                    <p>Persistent research, artifacts, and controlled execution.</p>
                 </div>
             </div>
         </div>
-
-        <div
-            id="agentEngineStatus"
-            class="agent-engine-status"
-            aria-live="polite"
-        >
+        <div id="agentEngineStatus" class="agent-engine-status" aria-live="polite">
             Checking workspace...
         </div>
     </header>
 
-    <div
-        id="agentNotice"
-        class="agent-notice"
-        hidden
-        aria-live="polite"
-    ></div>
+    <div id="agentNotice" class="agent-notice" hidden aria-live="polite"></div>
 
     <section class="agent-top-grid">
         <section class="agent-card create-agent-card">
@@ -61,8 +41,8 @@
                 <div>
                     <h2>Start an agent run</h2>
                     <p>
-                        Give Private AI a goal. The agent can iterate across
-                        allowed tools instead of stopping after one answer.
+                        Give Private AI a goal. The agent can research, create files,
+                        and when explicitly allowed, test Python inside its sandbox.
                     </p>
                 </div>
             </div>
@@ -71,14 +51,8 @@
                 <div class="form-grid two-column">
                     <label>
                         Name
-                        <input
-                            id="agentTitle"
-                            type="text"
-                            maxlength="120"
-                            placeholder="Washington land research"
-                        >
+                        <input id="agentTitle" type="text" maxlength="120" placeholder="Build and test a calculator">
                     </label>
-
                     <label>
                         Model
                         <select id="agentModelMode">
@@ -96,7 +70,7 @@
                         id="agentGoal"
                         rows="6"
                         maxlength="8000"
-                        placeholder="Example: Find promising buildable land within 100 miles of ZIP 98040, over 1 acre and under $100,000. Research missing criteria instead of rejecting a candidate just because one listing does not explicitly state buildability. Rank confirmed and unverified candidates separately with sources."
+                        placeholder="Example: Build a small Python calculator with separate logic and test files. Test it in the sandbox, fix any failures, re-test, and save the working files."
                         required
                     ></textarea>
                 </label>
@@ -114,52 +88,37 @@
 
                     <div class="agent-tool-stack">
                         <label class="agent-check-row">
-                            <input
-                                id="agentAllowWeb"
-                                type="checkbox"
-                                {% if not can_web %}disabled{% endif %}
-                            >
+                            <input id="agentAllowWeb" type="checkbox" {% if not can_web %}disabled{% endif %}>
                             <span>Allow public web research</span>
                         </label>
-
                         <label class="agent-check-row">
-                            <input
-                                id="agentAllowRag"
-                                type="checkbox"
-                            >
+                            <input id="agentAllowRag" type="checkbox">
                             <span>Allow indexed document search</span>
                         </label>
-
                         <label class="agent-check-row">
-                            <input
-                                id="agentAllowMemory"
-                                type="checkbox"
-                                {% if not can_memory %}disabled{% endif %}
-                            >
+                            <input id="agentAllowMemory" type="checkbox" {% if not can_memory %}disabled{% endif %}>
                             <span>Allow relevant personal memory</span>
                         </label>
+                        <label class="agent-check-row">
+                            <input id="agentAllowCode" type="checkbox" {% if not can_code %}disabled{% endif %}>
+                            <span>Allow sandboxed Python execution</span>
+                        </label>
+                        <small id="agentSandboxHint" class="privacy-note">Checking Docker sandbox...</small>
                     </div>
                 </div>
 
                 <div class="agent-foundation-note">
-                    <strong>v1.9 safety boundary</strong>
+                    <strong>v2.0 execution boundary</strong>
                     <span>
-                        Each run gets its own local workspace. Agents can create
-                        text, report, data, HTML and source-code files, but they
-                        cannot execute arbitrary host code yet. Web is opt-in.
-                        Private memory and RAG text are never used to construct
-                        public web queries.
+                        Code execution is opt-in per run. Python executes in a disposable
+                        Docker container with network disabled, a read-only workspace mount,
+                        no Docker socket, dropped Linux capabilities, and resource/time limits.
+                        The agent never executes arbitrary code directly on your Mac.
                     </span>
                 </div>
 
                 <div class="form-actions">
-                    <button
-                        id="startAgentButton"
-                        type="submit"
-                        class="primary-button"
-                    >
-                        Start agent
-                    </button>
+                    <button id="startAgentButton" type="submit" class="primary-button">Start agent</button>
                 </div>
             </form>
         </section>
@@ -168,46 +127,25 @@
             <div class="card-heading-row">
                 <div>
                     <h2>Agent runs</h2>
-                    <p>
-                        Runs keep their steps, sources, workspace and state.
-                    </p>
+                    <p>Runs keep their steps, sources, workspace, executions and state.</p>
                 </div>
-
-                <button
-                    id="refreshAgentRunsButton"
-                    class="secondary-button compact-button"
-                    type="button"
-                >
-                    Refresh
-                </button>
+                <button id="refreshAgentRunsButton" class="secondary-button compact-button" type="button">Refresh</button>
             </div>
-
-            <div
-                id="agentRunList"
-                class="agent-run-list"
-            >
+            <div id="agentRunList" class="agent-run-list">
                 <div class="agent-empty">Loading runs...</div>
             </div>
         </section>
     </section>
 
-    <section
-        id="agentDetailCard"
-        class="agent-card agent-detail-card"
-        hidden
-    >
+    <section id="agentDetailCard" class="agent-card agent-detail-card" hidden>
         <div class="agent-detail-header">
             <div>
                 <div class="agent-detail-title-row">
                     <h2 id="agentDetailTitle">Agent run</h2>
-                    <span
-                        id="agentDetailState"
-                        class="agent-state-pill"
-                    ></span>
+                    <span id="agentDetailState" class="agent-state-pill"></span>
                 </div>
                 <p id="agentDetailMeta"></p>
             </div>
-
             <div id="agentDetailActions" class="agent-detail-actions"></div>
         </div>
 
@@ -215,47 +153,21 @@
             <div class="agent-detail-main">
                 <section class="agent-detail-section">
                     <h3>Goal</h3>
-                    <div
-                        id="agentDetailGoal"
-                        class="agent-text-block"
-                    ></div>
+                    <div id="agentDetailGoal" class="agent-text-block"></div>
                 </section>
 
-                <section
-                    id="agentQuestionSection"
-                    class="agent-detail-section agent-question-section"
-                    hidden
-                >
+                <section id="agentQuestionSection" class="agent-detail-section agent-question-section" hidden>
                     <h3>Agent needs your input</h3>
-                    <div
-                        id="agentPendingQuestion"
-                        class="agent-question"
-                    ></div>
+                    <div id="agentPendingQuestion" class="agent-question"></div>
                     <form id="agentInputForm" class="agent-input-form">
-                        <textarea
-                            id="agentInputText"
-                            rows="3"
-                            maxlength="6000"
-                            placeholder="Answer the agent and continue this same run..."
-                            required
-                        ></textarea>
-                        <button
-                            class="primary-button"
-                            type="submit"
-                        >
-                            Continue run
-                        </button>
+                        <textarea id="agentInputText" rows="3" maxlength="6000" placeholder="Answer the agent and continue this same run..." required></textarea>
+                        <button class="primary-button" type="submit">Continue run</button>
                     </form>
                 </section>
 
                 <section class="agent-detail-section">
                     <h3>Result</h3>
-                    <div
-                        id="agentResult"
-                        class="agent-result"
-                    >
-                        Agent has not produced a final result yet.
-                    </div>
+                    <div id="agentResult" class="agent-result">Agent has not produced a final result yet.</div>
                 </section>
 
                 <section class="agent-detail-section">
@@ -272,12 +184,10 @@
                     <h3>Evidence</h3>
                     <div id="agentEvidenceList" class="agent-evidence-list"></div>
                 </section>
-
                 <section class="agent-detail-section compact-section">
                     <h3>Sources</h3>
                     <div id="agentSourceList" class="agent-source-list"></div>
                 </section>
-
                 <section class="agent-detail-section compact-section">
                     <h3>Artifacts</h3>
                     <div id="agentArtifactList" class="agent-artifact-list"></div>
@@ -289,8 +199,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script
-    src="{{ url_for('static', filename='js/agents.js') }}"
-    defer
-></script>
+<script src="{{ url_for('static', filename='js/agents.js') }}" defer></script>
 {% endblock %}
