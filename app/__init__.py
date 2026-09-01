@@ -32,6 +32,9 @@ from app.services.user_onboarding import (
     init_user_onboarding,
     initialize_user_onboarding_storage,
 )
+from app.services.agent_identity import (
+    initialize_agent_identity_storage,
+)
 
 
 def _load_or_create_secret_key():
@@ -72,6 +75,7 @@ def create_app():
     initialize_agent_sandbox_storage()
     initialize_library_storage()
     initialize_user_onboarding_storage()
+    initialize_agent_identity_storage()
     recover_stale_agent_runs()
 
     app = Flask(
@@ -99,17 +103,27 @@ def create_app():
     init_auth(app)
     init_user_onboarding(app)
 
+    # v2.1 must link a run to its persistent Agent identity before the
+    # agent API imports create_agent_run and starts its worker.
+    from app.services.agent_identity_runtime import (
+        apply_agent_identity_runtime,
+    )
+
+    apply_agent_identity_runtime()
+
     from app.web.routes import web_bp
     from app.web.automation_routes import automation_web_bp
     from app.web.agent_routes import agent_web_bp
     from app.web.library_routes import library_web_bp
     from app.web.onboarding_routes import onboarding_web_bp
+    from app.web.agent_identity_routes import agent_identity_web_bp
     from app.api.routes import api_bp
     from app.api.speech_routes import speech_api_bp
     from app.api.image_routes import image_api_bp, register_image_chat_interceptor
     from app.api.automation_routes import automation_api_bp
     from app.api.agent_routes import agent_api_bp
     from app.api.resource_routes import resource_api_bp
+    from app.api.agent_identity_routes import agent_identity_api_bp
 
     # Preserve the committed v1.9.2 research/evidence behavior. The v2.0
     # execution runner reuses those patched research/finalization helpers.
@@ -124,12 +138,14 @@ def create_app():
     app.register_blueprint(agent_web_bp)
     app.register_blueprint(library_web_bp)
     app.register_blueprint(onboarding_web_bp)
+    app.register_blueprint(agent_identity_web_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(speech_api_bp)
     app.register_blueprint(image_api_bp)
     app.register_blueprint(automation_api_bp)
     app.register_blueprint(agent_api_bp)
     app.register_blueprint(resource_api_bp)
+    app.register_blueprint(agent_identity_api_bp)
 
     @app.context_processor
     def inject_product_context():

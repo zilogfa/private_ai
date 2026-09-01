@@ -15,3 +15,69 @@
     text-decoration: none;
     font-size: 13px;
 }
+
+
+.atlas-agent-identity-picker {
+    display: grid;
+    grid-template-columns:
+        minmax(0, 1fr)
+        auto;
+    align-items: end;
+    gap: 8px 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel);
+}
+
+.atlas-agent-identity-picker label {
+    display: grid;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.atlas-agent-identity-picker select {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 9px 10px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.atlas-agent-identity-picker .privacy-note {
+    grid-column: 1 / -1;
+}
+
+.atlas-agent-manage-link,
+.atlas-agent-identities-link {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13px;
+}
+
+.atlas-agent-manage-link {
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+}
+
+.atlas-agent-identities-link {
+    margin-left: 12px;
+}
+
+.atlas-onboarding-admin-link {
+    margin-left: auto;
+}
+
+@media (max-width: 700px) {
+    .atlas-agent-identity-picker {
+        grid-template-columns: 1fr;
+    }
+
+    .atlas-agent-identity-picker .privacy-note {
+        grid-column: auto;
+    }
+}

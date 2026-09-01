@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Agents · {{ product.name }}{% endblock %}
+{% block body_class %}agent-identities-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
+
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/agent-identities.css') }}"
+>
+{% endblock %}
+
+{% block content %}
+<main
+    id="agentIdentitiesApp"
+    class="agent-identities-page"
+>
+    <header class="agent-identities-header">
+        <div>
+            <a
+                href="{{ url_for('agent_web.agents_page') }}"
+                class="agent-identities-back"
+            >
+                ← Back to Agent Workspace
+            </a>
+
+            <div class="agent-identities-title-row">
+                <div class="brand-mark">
+                    {{ product.mark }}
+                </div>
+
+                <div>
+                    <h1>Persistent Agents</h1>
+                    <p>
+                        Give each ATLAS Agent its own identity, standing instructions and memory.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="agent-identities-signature">
+            {{ product.signature }}
+        </div>
+    </header>
+
+    <div
+        id="agentIdentityNotice"
+        class="agent-identity-notice"
+        hidden
+        aria-live="polite"
+    ></div>
+
+    <section class="agent-identities-layout">
+        <aside class="agent-identities-list-card">
+            <div class="agent-identities-list-heading">
+                <div>
+                    <h2>Your Agents</h2>
+                    <small>
+                        Memories are isolated per Agent.
+                    </small>
+                </div>
+
+                <button
+                    id="newAgentIdentityButton"
+                    class="primary-button"
+                    type="button"
+                >
+                    New
+                </button>
+            </div>
+
+            <div
+                id="agentIdentityList"
+                class="agent-identity-list"
+            >
+                Loading…
+            </div>
+        </aside>
+
+        <section class="agent-identity-editor-card">
+            <div id="agentIdentityEditor">
+                <div class="agent-identity-empty">
+                    Select an Agent or create a new one.
+                </div>
+            </div>
+        </section>
+    </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/agent-identities.js') }}"
+    defer
+></script>
+{% endblock %}

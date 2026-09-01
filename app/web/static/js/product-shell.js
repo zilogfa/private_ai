@@ -257,6 +257,199 @@
         );
     }
 
+    function getCookie(name) {
+        const prefix = `${name}=`;
+
+        for (const part of document.cookie.split(";")) {
+            const value = part.trim();
+
+            if (value.startsWith(prefix)) {
+                return decodeURIComponent(
+                    value.slice(prefix.length)
+                );
+            }
+        }
+
+        return "";
+    }
+
+    function setAgentIdentityCookie(identityId) {
+        document.cookie = (
+            "atlas_agent_identity="
+            + encodeURIComponent(identityId || "")
+            + "; path=/; SameSite=Lax"
+        );
+    }
+
+    async function addAgentIdentitySelector() {
+        const form = document.getElementById("agentForm");
+
+        if (
+            !form
+            || form.dataset.atlasIdentityReady === "1"
+            || form.dataset.atlasIdentityLoading === "1"
+        ) {
+            return;
+        }
+
+        form.dataset.atlasIdentityLoading = "1";
+
+        try {
+            const response = await fetch(
+                "/api/agent-identities",
+                {
+                    headers: {
+                        Accept: "application/json",
+                    },
+                },
+            );
+
+            if (!response.ok) {
+                form.dataset.atlasIdentityLoading = "0";
+                return;
+            }
+
+            const data = await response.json();
+            const identities = data.identities || [];
+
+            if (!identities.length) {
+                form.dataset.atlasIdentityLoading = "0";
+                return;
+            }
+
+            const row = document.createElement("div");
+            row.className = "atlas-agent-identity-picker";
+
+            const label = document.createElement("label");
+            label.textContent = "Agent identity";
+
+            const select = document.createElement("select");
+            select.id = "atlasAgentIdentitySelect";
+
+            for (const identity of identities) {
+                const option = document.createElement("option");
+                option.value = identity.id;
+                option.textContent = (
+                    identity.name
+                    + (
+                        identity.is_default
+                            ? " · default"
+                            : ""
+                    )
+                    + (
+                        identity.memory_count
+                            ? ` · ${identity.memory_count} memories`
+                            : ""
+                    )
+                );
+
+                select.appendChild(option);
+            }
+
+            const requested = getCookie(
+                "atlas_agent_identity"
+            );
+
+            const valid = identities.some(
+                (identity) => identity.id === requested
+            );
+
+            select.value = valid
+                ? requested
+                : (
+                    data.default_id
+                    || identities[0].id
+                );
+
+            setAgentIdentityCookie(
+                select.value
+            );
+
+            select.addEventListener("change", () => {
+                setAgentIdentityCookie(
+                    select.value
+                );
+            });
+
+            const manage = document.createElement("a");
+            manage.href = "/agents/identities";
+            manage.className = "atlas-agent-manage-link";
+            manage.textContent = "Manage Agents";
+
+            const note = document.createElement("small");
+            note.className = "privacy-note";
+            note.textContent = (
+                "This Agent's own memory is isolated from personal memory. "
+                + "Public web-query planning never receives Agent Memory."
+            );
+
+            label.appendChild(select);
+            row.append(label, manage, note);
+
+            const goalLabel = Array.from(
+                form.querySelectorAll("label")
+            ).find(
+                (item) => (
+                    (item.firstChild?.textContent || "")
+                    .trim()
+                    .toLowerCase()
+                    === "goal"
+                )
+            );
+
+            if (goalLabel) {
+                form.insertBefore(
+                    row,
+                    goalLabel,
+                );
+            } else {
+                form.prepend(row);
+            }
+
+            form.dataset.atlasIdentityReady = "1";
+            form.dataset.atlasIdentityLoading = "0";
+
+            form.addEventListener("reset", () => {
+                window.setTimeout(() => {
+                    const current = getCookie(
+                        "atlas_agent_identity"
+                    );
+
+                    if (
+                        current
+                        && Array.from(select.options)
+                            .some((option) => option.value === current)
+                    ) {
+                        select.value = current;
+                    }
+                }, 0);
+            });
+        } catch (_) {
+            form.dataset.atlasIdentityLoading = "0";
+        }
+    }
+
+    function addAgentIdentityNavigation() {
+        const agentBack = document.querySelector(".agent-back-link");
+
+        if (
+            !agentBack
+            || document.querySelector(".atlas-agent-identities-link")
+        ) {
+            return;
+        }
+
+        const link = document.createElement("a");
+        link.href = "/agents/identities";
+        link.className = "atlas-agent-identities-link";
+        link.textContent = "Agents";
+
+        agentBack.insertAdjacentElement(
+            "afterend",
+            link,
+        );
+    }
+
     function addProductSignature() {
         const sidebarUser = document.querySelector(".sidebar-user");
 
@@ -278,6 +471,8 @@
         updateWorkspaceZip();
         addAdminOnboardingLink();
         clarifyAgentRunName();
+        addAgentIdentitySelector();
+        addAgentIdentityNavigation();
         addProductSignature();
     }
 
