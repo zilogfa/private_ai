@@ -11,6 +11,7 @@ ATLAS core code.
 
 import json
 import math
+import os
 import uuid
 
 from app.database import (
@@ -47,6 +48,30 @@ VALID_MEMORY_STATUS = {
 }
 
 DEFAULT_AGENT_NAME = "ATLAS General"
+
+# Relevance gates prevent an Agent with a long history from injecting unrelated
+# project-specific memories merely because they are the "best" of a weak set.
+#
+# Procedural/preferences may generalize across projects at a slightly lower
+# threshold. Domain/general/lesson memories require stronger semantic overlap.
+AGENT_MEMORY_RELEVANCE_GENERAL = float(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MEMORY_RELEVANCE_GENERAL",
+        "0.42",
+    )
+)
+AGENT_MEMORY_RELEVANCE_PROCEDURAL = float(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MEMORY_RELEVANCE_PROCEDURAL",
+        "0.32",
+    )
+)
+AGENT_MEMORY_CONTEXT_LIMIT = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MEMORY_CONTEXT_LIMIT",
+        "4",
+    )
+)
 
 _STORAGE_READY = False
 _RUN_MEMORY_CACHE = {}
@@ -1716,11 +1741,45 @@ def retrieve_agent_memories(
         reverse=True,
     )
 
-    selected = scored[
+    gated = []
+
+    for item in scored:
+        category = str(
+            item.get(
+                "category"
+            )
+            or "general"
+        ).lower()
+
+        threshold = (
+            AGENT_MEMORY_RELEVANCE_PROCEDURAL
+            if category
+            in {
+                "procedure",
+                "preference",
+                "project_pattern",
+            }
+            else AGENT_MEMORY_RELEVANCE_GENERAL
+        )
+
+        # If embeddings are unavailable, semantic_score remains 0.0 and the
+        # memory is conservatively omitted instead of blindly injecting stale
+        # context.
+        if float(
+            item.get(
+                "semantic_score"
+            )
+            or 0.0
+        ) >= threshold:
+            gated.append(
+                item
+            )
+
+    selected = gated[
         :max(
-            1,
+            0,
             min(
-                20,
+                AGENT_MEMORY_CONTEXT_LIMIT,
                 int(
                     limit
                 ),
@@ -1819,7 +1878,7 @@ def agent_context_for_run(
                 )
                 or ""
             ),
-            limit=6,
+            limit=AGENT_MEMORY_CONTEXT_LIMIT,
         )
 
         cached = memories

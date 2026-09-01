@@ -1326,20 +1326,21 @@ def _filesystem_environment_block(analysis):
     )
 
 
-def _environment_profile_text():
-    profile = sandbox_runtime_profile()
+def _environment_profile_text(run):
+    profile = sandbox_runtime_profile(run["user_id"], run["id"])
 
     return (
-        "Sandbox capability profile:\\n"
-        f"- durable source mount: {profile['source_mount']} (read-only)\\n"
+        "Sandbox capability profile:\n"
+        f"- durable source mount: {profile['source_mount']} (read-only)\n"
         f"- execution working directory: {profile['runtime_workdir']} "
-        f"(writable, ephemeral tmpfs {profile['runtime_tmpfs']})\\n"
-        f"- temp directory: {profile['tmp_dir']} (writable)\\n"
-        f"- network: {'enabled' if profile['network'] else 'disabled'}\\n"
-        f"- runs as root: {'yes' if profile['runs_as_root'] else 'no'}\\n"
-        f"- dependency installation during execution: "
-        f"{'enabled' if profile['dependency_installation'] else 'disabled'}\\n"
-        f"- dependency note: {profile['dependency_note']}\\n"
+        f"(writable, ephemeral tmpfs {profile['runtime_tmpfs']})\n"
+        f"- temp directory: {profile['tmp_dir']} (writable)\n"
+        f"- execution network: {'enabled' if profile.get('execution_network') else 'disabled'}\n"
+        f"- dependency setup network: {'enabled' if profile.get('setup_network') else 'disabled'}\n"
+        f"- runs as root: {'yes' if profile['runs_as_root'] else 'no'}\n"
+        f"- controlled dependency setup available: "
+        f"{'yes' if profile['dependency_installation'] else 'no'}\n"
+        f"- dependency note: {profile['dependency_note']}\n"
         "Therefore, do NOT classify tempfile usage, os imports, JSON/SQLite "
         "runtime writes, or 'Directory not empty' cleanup errors as sandbox "
         "read-only limitations merely because the durable source mount is read-only."
@@ -1573,7 +1574,10 @@ def create_debug_plan(run, analysis=None):
         "The durable /workspace source mount being read-only does NOT mean the executed "
         "program cannot write files: it runs from writable ephemeral /runtime and also has "
         "writable /tmp. 'Directory not empty' is a cleanup/code issue, not permission denial. "
-        "If a third-party dependency is absent from the sandbox, preserve "
+        "If a third-party dependency is absent, consult the sandbox capability profile. "
+        "When dependency installation is enabled, do NOT treat that absence as a permanent "
+        "environment blocker; the Agent can create requirements.txt and use its controlled "
+        "Project environment setup. When dependency installation is disabled, preserve "
         "the intended architecture and set blocked_by_environment=true unless legitimate "
         "dependency-independent testing remains.\n\n"
         "Return ONLY JSON with keys:\n"
@@ -1599,7 +1603,7 @@ def create_debug_plan(run, analysis=None):
         + "\n\nCURRENT SOURCE SNAPSHOT:\n"
         + (_workspace_source_bundle(run, analysis) or "No source available.")
         + "\n\nSANDBOX CAPABILITY PROFILE:\n"
-        + _environment_profile_text()
+        + _environment_profile_text(run)
         + "\n\nRECENT SANDBOX HISTORY:\n"
         + _execution_history_text(analysis)
         + (
@@ -1655,8 +1659,18 @@ def create_debug_plan(run, analysis=None):
     # Environment blocking is evidence-based. The planner model may suggest a
     # blocker, but it cannot turn a normal code/test failure into an environment
     # limitation without deterministic support.
-    blocked = bool(
+    runtime_profile = sandbox_runtime_profile(
+        run["user_id"],
+        run["id"],
+    )
+
+    dependency_is_blocking = bool(
         environment_dependency
+        and not runtime_profile.get("dependency_installation")
+    )
+
+    blocked = bool(
+        dependency_is_blocking
         or filesystem_block
     )
 
@@ -1683,7 +1697,7 @@ def create_debug_plan(run, analysis=None):
     }
 
     if blocked and not plan["environment_note"]:
-        if environment_dependency:
+        if dependency_is_blocking:
             plan["environment_note"] = (
                 "The latest failure requires a third-party dependency unavailable in "
                 "the current sandbox image. Preserve the requested architecture rather "

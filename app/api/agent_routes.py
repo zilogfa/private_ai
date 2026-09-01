@@ -28,6 +28,15 @@ from app.services.agent_sandbox import (
     sandbox_status,
     set_agent_run_code_access,
 )
+from app.services.agent_environment import (
+    AGENT_ENVIRONMENT_PERMISSION,
+    ENV_PROFILE_PROJECT,
+    ENV_PROFILE_STRICT,
+    environment_status_for_run,
+    get_agent_run_environment,
+    list_environment_builds,
+    set_agent_run_environment_profile,
+)
 from app.services.rag import has_indexed_documents
 
 agent_api_bp = Blueprint("agent_api", __name__, url_prefix="/api/agents")
@@ -59,12 +68,32 @@ def _validate_capabilities(user_id, payload):
             "This account does not have sandboxed code-execution permission."
         )
 
+    profile = str(
+        payload.get("sandbox_profile")
+        or ENV_PROFILE_STRICT
+    ).strip().lower()
+
+    if profile not in {ENV_PROFILE_STRICT, ENV_PROFILE_PROJECT}:
+        raise AgentStoreError("Unknown sandbox environment profile.")
+
+    if (
+        bool(payload.get("allow_code"))
+        and profile == ENV_PROFILE_PROJECT
+        and not user_has_permission(user_id, AGENT_ENVIRONMENT_PERMISSION)
+    ):
+        raise AgentStoreError(
+            "This account does not have dependency-enabled project environment permission."
+        )
+
 
 def _decorate_run(user_id, run):
     if not run:
         return None
     result = dict(run)
     result["allow_code"] = agent_run_allows_code(user_id, run["id"])
+    environment = get_agent_run_environment(user_id, run["id"])
+    result["sandbox_profile"] = environment.get("profile") or ENV_PROFILE_STRICT
+    result["environment_status"] = environment.get("status") or "base"
     return result
 
 
@@ -83,6 +112,8 @@ def _run_detail(user_id, run_id):
         "sandbox_executions": list_agent_sandbox_executions(
             user_id, run_id, limit=30
         ),
+        "project_environment": environment_status_for_run(user_id, run_id),
+        "environment_builds": list_environment_builds(user_id, run_id, limit=20),
     }
 
 
@@ -100,8 +131,26 @@ def agent_status():
                 "code_execution": user_has_permission(
                     user_id, AGENT_CODE_PERMISSION
                 ),
+                "project_environment": user_has_permission(
+                    user_id, AGENT_ENVIRONMENT_PERMISSION
+                ),
             },
             "sandbox": sandbox_status(),
+            "sandbox_profiles": [
+                {
+                    "id": ENV_PROFILE_STRICT,
+                    "label": "Strict",
+                    "description": "Network-off execution using base/preinstalled Python packages.",
+                },
+                {
+                    "id": ENV_PROFILE_PROJECT,
+                    "label": "Project",
+                    "description": (
+                        "Sanitized dependencies may be downloaded during an isolated setup build; "
+                        "normal execution remains network-off."
+                    ),
+                },
+            ],
         }
     )
 
@@ -136,6 +185,15 @@ def create_run():
             user_id,
             run["id"],
             bool(payload.get("allow_code")),
+        )
+        set_agent_run_environment_profile(
+            user_id,
+            run["id"],
+            (
+                payload.get("sandbox_profile")
+                if bool(payload.get("allow_code"))
+                else ENV_PROFILE_STRICT
+            ),
         )
         run = _decorate_run(user_id, run)
     except AgentStoreError as error:

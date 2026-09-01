@@ -24,7 +24,9 @@ _TOOL_REGISTRY = {
     "agent.workspace.write": ToolSpec("agent.workspace.write", "agent.use", "Create or revise text, data, HTML, or source-code files inside one agent run's local workspace."),
     "agent.workspace.list": ToolSpec("agent.workspace.list", "agent.use", "List logical files in one agent run's private workspace."),
     "agent.workspace.read": ToolSpec("agent.workspace.read", "agent.use", "Read one text/source file from one agent run's private workspace."),
-    "agent.sandbox.python": ToolSpec("agent.sandbox.python", "agent.code.execute", "Execute one Python workspace file inside a resource-limited, network-disabled Docker sandbox with a read-only workspace mount."),
+    "agent.sandbox.python": ToolSpec("agent.sandbox.python", "agent.code.execute", "Execute one Python workspace file inside a resource-limited Docker sandbox. Normal execution has network disabled, immutable durable source, and a writable disposable runtime."),
+    "agent.environment.plan": ToolSpec("agent.environment.plan", "agent.environment.setup", "Create or update a sanitized requirements.txt manifest for a missing Python dependency."),
+    "agent.environment.setup": ToolSpec("agent.environment.setup", "agent.environment.setup", "Build or reuse an isolated content-addressed Python dependency image. Package names/specifiers are sent to the package index during setup only; normal execution remains network-disabled.", True, True),
     "agent.input.request": ToolSpec("agent.input.request", "agent.use", "Pause an agent run at a real decision point and resume the same run after user input."),
 }
 

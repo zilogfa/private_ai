@@ -17,6 +17,8 @@
         allowRag: document.getElementById("agentAllowRag"),
         allowMemory: document.getElementById("agentAllowMemory"),
         allowCode: document.getElementById("agentAllowCode"),
+        sandboxProfile: document.getElementById("agentSandboxProfile"),
+        environmentHint: document.getElementById("agentEnvironmentHint"),
         sandboxHint: document.getElementById("agentSandboxHint"),
         startButton: document.getElementById("startAgentButton"),
         refreshButton: document.getElementById("refreshAgentRunsButton"),
@@ -45,6 +47,7 @@
     let pollHandle = null;
     let requestBusy = false;
     let sandboxReady = false;
+    let projectEnvironmentAllowed = false;
 
     function showNotice(message, kind = "info") {
         if (!el.notice) return;
@@ -144,7 +147,12 @@
             const title = document.createElement("strong");
             title.textContent = run.title || "Agent run";
             const meta = document.createElement("small");
-            meta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${run.allow_code ? " · sandbox" : ""}`;
+            const envLabel = (
+                run.allow_code && run.sandbox_profile === "project"
+                    ? " · project env"
+                    : (run.allow_code ? " · strict sandbox" : "")
+            );
+            meta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${envLabel}`;
             titleWrap.append(title, meta);
             const state = document.createElement("span");
             state.className = `agent-state-pill state-${run.state || "unknown"}`;
@@ -346,7 +354,12 @@
         el.detailTitle.textContent = run.title || "Agent run";
         el.detailState.textContent = stateLabel(run.state);
         el.detailState.className = `agent-state-pill state-${run.state || "unknown"}`;
-        el.detailMeta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${run.allow_code ? " · Docker sandbox enabled" : ""} · updated ${formatDate(run.updated_at)}`;
+        const envLabel = (
+            run.allow_code && run.sandbox_profile === "project"
+                ? " · Docker Project environment"
+                : (run.allow_code ? " · Docker Strict sandbox" : "")
+        );
+        el.detailMeta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${envLabel} · updated ${formatDate(run.updated_at)}`;
         el.detailGoal.textContent = run.goal || "";
         el.result.classList.remove("muted", "error-text");
         if (run.result) {
@@ -368,6 +381,21 @@
         renderArtifacts(data.artifacts || []);
     }
 
+    function updateEnvironmentHint() {
+        if (!el.environmentHint || !el.sandboxProfile) return;
+
+        const project = el.sandboxProfile.value === "project";
+        el.environmentHint.textContent = project
+            ? (
+                "Project: ATLAS may download sanitized Python dependencies during an "
+                + "isolated setup build. Project code still executes with network OFF."
+            )
+            : (
+                "Strict: no dependency downloads. Uses only the base image/preinstalled "
+                + "Python packages; execution network is OFF."
+            );
+    }
+
     async function loadStatus() {
         try {
             const data = await api("/api/agents/status");
@@ -375,6 +403,24 @@
             const sandbox = data.sandbox || {};
             const active = engine.active_threads || 0;
             sandboxReady = Boolean(sandbox.ready);
+            projectEnvironmentAllowed = Boolean(
+                data.capabilities?.project_environment
+            );
+
+            if (el.sandboxProfile) {
+                const projectOption = Array.from(el.sandboxProfile.options).find(
+                    (option) => option.value === "project"
+                );
+                if (projectOption) {
+                    projectOption.disabled = !projectEnvironmentAllowed;
+                }
+                if (!projectEnvironmentAllowed && el.sandboxProfile.value === "project") {
+                    el.sandboxProfile.value = "strict";
+                }
+                el.sandboxProfile.disabled = !canCode || !sandboxReady;
+                updateEnvironmentHint();
+            }
+
             if (el.sandboxHint) {
                 el.sandboxHint.textContent = sandbox.message || (sandboxReady ? "Docker Python sandbox is ready." : "Docker sandbox is unavailable.");
             }
@@ -450,11 +496,18 @@
                     allow_rag: el.allowRag.checked,
                     allow_memory: el.allowMemory.checked,
                     allow_code: Boolean(el.allowCode?.checked),
+                    sandbox_profile: (
+                        el.allowCode?.checked
+                            ? (el.sandboxProfile?.value || "strict")
+                            : "strict"
+                    ),
                 },
             });
             el.form.reset();
             el.maxSteps.value = "6";
             el.model.value = "auto";
+            if (el.sandboxProfile) el.sandboxProfile.value = "strict";
+            updateEnvironmentHint();
             selectedRunId = data.run.id;
             showNotice("Agent started. You can leave this page; the run state is persisted locally.", "success");
             await Promise.all([loadRuns(), loadRunDetail(selectedRunId), loadStatus()]);
@@ -535,5 +588,8 @@
         ]);
     });
     el.inputForm.addEventListener("submit", submitAgentInput);
+    el.sandboxProfile?.addEventListener("change", updateEnvironmentHint);
+    el.allowCode?.addEventListener("change", updateEnvironmentHint);
+    updateEnvironmentHint();
     poll();
 })();

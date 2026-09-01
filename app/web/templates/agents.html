@@ -8,6 +8,7 @@
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/agents.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-revisions.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent-environments.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -104,17 +105,30 @@
                             <input id="agentAllowCode" type="checkbox" {% if not can_code %}disabled{% endif %}>
                             <span>Allow sandboxed Python execution</span>
                         </label>
+
+                        <label class="agent-environment-profile-row">
+                            <span>Sandbox environment</span>
+                            <select id="agentSandboxProfile" {% if not can_code %}disabled{% endif %}>
+                                <option value="strict" selected>Strict · safest default</option>
+                                <option value="project">Project · dependency-enabled</option>
+                            </select>
+                        </label>
+
+                        <small id="agentEnvironmentHint" class="privacy-note">
+                            Strict: no dependency downloads. Normal execution network is OFF.
+                        </small>
                         <small id="agentSandboxHint" class="privacy-note">Checking Docker sandbox...</small>
                     </div>
                 </div>
 
                 <div class="agent-foundation-note">
-                    <strong>v2.0 execution boundary</strong>
+                    <strong>v2.2 execution boundary</strong>
                     <span>
-                        Code execution is opt-in per run. Python executes in a disposable
-                        Docker container with network disabled, a read-only workspace mount,
-                        no Docker socket, dropped Linux capabilities, and resource/time limits.
-                        The agent never executes arbitrary code directly on your Mac.
+                        Code execution is opt-in per run. Strict mode never downloads dependencies.
+                        Project mode may contact the Python package index only during a separate,
+                        sanitized dependency-build phase; normal project execution returns to network OFF.
+                        Durable source remains read-only, runtime files are disposable, and the container
+                        has no Docker socket, dropped Linux capabilities, and resource/time limits.
                     </span>
                 </div>
 

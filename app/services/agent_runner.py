@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 
@@ -55,6 +56,30 @@ AGENT_CONTEXT_SIZE = 8192
 AGENT_RESULT_LIMIT = 18000
 AGENT_STEP_OUTPUT_LIMIT = 6500
 AGENT_LEDGER_LIMIT = 18000
+
+# A stalled local model request used to wait up to 900 seconds with no stream
+# activity, leaving the Agent UI looking frozen between recorded steps.
+#
+# The read timeout is an IDLE timeout, not a total-generation timeout. As long
+# as Ollama continues streaming chunks (including thinking chunks), long useful
+# generations may continue. If Ollama produces no HTTP stream data for this
+# period, the run fails cleanly instead of appearing stuck for 15 minutes.
+AGENT_MODEL_CONNECT_TIMEOUT_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MODEL_CONNECT_TIMEOUT_SECONDS",
+        "10",
+    )
+)
+AGENT_MODEL_IDLE_TIMEOUT_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_MODEL_IDLE_TIMEOUT_SECONDS",
+        "180",
+    )
+)
+AGENT_MODEL_KEEP_ALIVE = os.environ.get(
+    "PRIVATE_AI_AGENT_MODEL_KEEP_ALIVE",
+    "10m",
+).strip() or "10m"
 
 EMAIL_RE = re.compile(
     r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
@@ -164,6 +189,9 @@ def _run_model(
             {"role": "user", "content": user_prompt},
         ],
         "stream": True,
+        # Agent runs make many short controller/finalizer calls. Keep the model
+        # resident for a while so Ollama does not unload/reload it between steps.
+        "keep_alive": AGENT_MODEL_KEEP_ALIVE,
         "options": {
             "num_ctx": AGENT_CONTEXT_SIZE,
         },
@@ -180,7 +208,10 @@ def _run_model(
             OLLAMA_CHAT_URL,
             json=payload,
             stream=True,
-            timeout=900,
+            timeout=(
+                AGENT_MODEL_CONNECT_TIMEOUT_SECONDS,
+                AGENT_MODEL_IDLE_TIMEOUT_SECONDS,
+            ),
         ) as response:
             if not response.ok:
                 detail = ""
@@ -219,6 +250,18 @@ def _run_model(
 
     except AgentCancelled:
         raise
+    except requests.exceptions.ReadTimeout as error:
+        raise AgentExecutionError(
+            "Local agent model stopped streaming for too long. "
+            f"No Ollama stream activity was received for "
+            f"{AGENT_MODEL_IDLE_TIMEOUT_SECONDS} seconds. "
+            "The run was stopped cleanly instead of remaining stuck; "
+            "use Continue / Revise or retry after checking Ollama."
+        ) from error
+    except requests.exceptions.ConnectTimeout as error:
+        raise AgentExecutionError(
+            "Timed out connecting to Ollama during the agent run."
+        ) from error
     except requests.exceptions.ConnectionError as error:
         raise AgentExecutionError(
             "Could not connect to Ollama during the agent run."

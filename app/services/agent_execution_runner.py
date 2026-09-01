@@ -26,6 +26,16 @@ from app.services.agent_sandbox import (
     run_python_sandbox,
     write_workspace_file,
 )
+from app.services.agent_environment import (
+    AgentEnvironmentError,
+    add_missing_dependency_to_manifest,
+    dependency_manifest_needs_update,
+    environment_needs_setup,
+    environment_status_for_run,
+    format_environment_observation,
+    project_environment_allowed,
+    setup_project_environment,
+)
 from app.services.agent_project_planner import (
     active_plan_blocks_on_environment,
     active_plan_matches_current_failure,
@@ -315,6 +325,12 @@ def _available_actions(run):
         for name in ("workspace_list", "workspace_read", "run_python"):
             if name not in actions:
                 actions.append(name)
+
+        if project_environment_allowed(run["user_id"], run["id"]):
+            for name in ("environment_plan", "environment_setup"):
+                if name not in actions:
+                    actions.append(name)
+
     return actions
 
 
@@ -377,6 +393,9 @@ def _step_changed_workspace(step):
     )
 
     if action == "write_file":
+        return True
+
+    if action == "environment_plan":
         return True
 
     if action == "project_repair":
@@ -521,6 +540,46 @@ def _sandbox_verification_summary(run):
     )
 
 
+def _environment_context(run):
+    try:
+        status = environment_status_for_run(
+            run["user_id"],
+            run["id"],
+        )
+    except Exception as error:
+        return f"Environment status unavailable: {error}"
+
+    requested = list(
+        status.get("current_requirements")
+        or status.get("requested_requirements")
+        or []
+    )
+
+    lines = [
+        f"Profile: {status.get('profile') or 'strict'}",
+        f"Status: {status.get('status') or 'base'}",
+        f"Ready: {'yes' if status.get('ready') else 'no'}",
+        "Execution network: disabled",
+    ]
+
+    if status.get("profile") == "project":
+        lines.append("Dependency setup network: allowed only during isolated setup/build")
+
+    if requested:
+        lines.append("Requested dependencies: " + ", ".join(requested))
+
+    if status.get("image_tag") or status.get("execution_image"):
+        lines.append(
+            "Environment image: "
+            + str(status.get("execution_image") or status.get("image_tag"))
+        )
+
+    if status.get("last_error"):
+        lines.append("Last environment error: " + str(status.get("last_error"))[-1800:])
+
+    return "\n".join(lines)[:5000]
+
+
 def _sandbox_forced_final(run):
     """
     Sandbox-aware finalizer.
@@ -589,6 +648,40 @@ def _plan_next_action(run):
     available = _available_actions(run)
     current_step = int(run.get("current_step") or 0)
     remaining = max(0, int(run.get("max_steps") or 6) - current_step)
+
+    # v2.2 dependency-aware environment loop. Manifest changes and dependency
+    # setup are infrastructure actions and must happen BEFORE re-testing a file
+    # that previously failed because its dependency was unavailable.
+    if (
+        project_environment_allowed(run["user_id"], run["id"])
+        and "environment_plan" in available
+        and dependency_manifest_needs_update(run["user_id"], run["id"])
+        and remaining > 0
+    ):
+        return {
+            "action": "environment_plan",
+            "reason": (
+                "The current project source or latest sandbox failure shows an "
+                "undeclared third-party dependency. Add a sanitized dependency manifest "
+                "without changing the requested application architecture."
+            ),
+            "model": "deterministic",
+        }
+
+    if (
+        project_environment_allowed(run["user_id"], run["id"])
+        and "environment_setup" in available
+        and environment_needs_setup(run["user_id"], run["id"])
+        and remaining > 0
+    ):
+        return {
+            "action": "environment_setup",
+            "reason": (
+                "Build or reuse the isolated dependency image for the current "
+                "requirements.txt before executing the project again."
+            ),
+            "model": "deterministic",
+        }
 
     # Deterministic engineering-loop guard: once code has been changed after a
     # sandbox run, test that revision before allowing another speculative edit.
@@ -747,9 +840,15 @@ def _plan_next_action(run):
             "model": "adaptive",
         }
 
-    if active_plan_blocks_on_environment(
-        run["user_id"],
-        run["id"],
+    if (
+        active_plan_blocks_on_environment(
+            run["user_id"],
+            run["id"],
+        )
+        and not project_environment_allowed(
+            run["user_id"],
+            run["id"],
+        )
     ):
         return {
             "action": "final",
@@ -809,8 +908,10 @@ def _plan_next_action(run):
         "the goal explicitly asks to involve the user.\n"
         "- final: finish only when useful work is complete or further progress is not "
         "reasonable within the remaining budget.\n\n"
-        "Prefer Python standard-library solutions in v2.0 because arbitrary dependency "
-        "installation is intentionally disabled. Return ONLY one JSON object."
+        "In Strict profile prefer standard-library/preinstalled dependencies. In Project "
+        "profile preserve legitimately requested third-party frameworks and use the controlled "
+        "requirements/environment flow rather than rewriting the architecture merely to avoid "
+        "a dependency. Return ONLY one JSON object."
     )
 
     user_prompt = (
@@ -1019,6 +1120,28 @@ def _execute_run_python(run, step, filename):
     return format_execution_observation(execution)[: base_runner.AGENT_STEP_OUTPUT_LIMIT]
 
 
+def _execute_environment_plan(run):
+    result = add_missing_dependency_to_manifest(
+        run["user_id"],
+        run["id"],
+    )
+    return (
+        f"Updated {result['file']['filename']} for missing import "
+        f"{result['module']} -> PyPI package {result['package']}.\n"
+        "The manifest contains only sanitized PyPI package specifications. "
+        "ATLAS will build/reuse the isolated Project dependency image before re-testing."
+    )[:base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
+
+def _execute_environment_setup(run):
+    result = setup_project_environment(
+        run["user_id"],
+        run["id"],
+        cancel_check=lambda: base_runner._control_probe(run, force=True),
+    )
+    return format_environment_observation(result)[:base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
+
 def _execute_project_plan(run):
     analysis = analyze_project_state(run)
     plan = create_debug_plan(
@@ -1165,6 +1288,8 @@ def execute_agent_run(user_id, run_id):
                 "workspace_list": "agent.workspace.list",
                 "workspace_read": "agent.workspace.read",
                 "run_python": "agent.sandbox.python",
+                "environment_plan": "agent.environment.plan",
+                "environment_setup": "agent.environment.setup",
                 "project_plan": "agent.project.plan",
                 "project_repair": "agent.project.repair",
                 "final": "agent.finalize",
@@ -1209,6 +1334,10 @@ def execute_agent_run(user_id, run_id):
                     output = _execute_workspace_read(run, action_data.get("filename"))
                 elif action == "run_python":
                     output = _execute_run_python(run, step, action_data.get("filename"))
+                elif action == "environment_plan":
+                    output = _execute_environment_plan(run)
+                elif action == "environment_setup":
+                    output = _execute_environment_setup(run)
                 elif action == "project_plan":
                     output = _execute_project_plan(run)
                 elif action == "project_repair":
@@ -1236,6 +1365,9 @@ def execute_agent_run(user_id, run_id):
             except AgentStoreError as error:
                 output = f"Action could not complete: {error}"
                 status = "blocked"
+            except AgentEnvironmentError as error:
+                output = f"Project environment action could not complete: {error}"
+                status = "error"
             except AgentSandboxError as error:
                 output = f"Sandbox action could not complete: {error}"
                 status = "error"

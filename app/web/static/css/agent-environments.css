@@ -1,0 +1,20 @@
+.agent-environment-profile-row {
+    display: grid;
+    gap: 6px;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.agent-environment-profile-row select {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px 9px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.agent-environment-profile-row select:disabled {
+    opacity: 0.55;
+}

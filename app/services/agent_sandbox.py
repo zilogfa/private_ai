@@ -191,14 +191,33 @@ def _quick(command, timeout=4):
         return None, str(exc)
 
 
-def sandbox_runtime_profile():
-    """
-    Deterministic capability profile for planners/controllers.
+def sandbox_runtime_profile(user_id=None, run_id=None):
+    """Deterministic execution/setup capability profile."""
+    profile_name = "strict"
+    dependency_installation = False
+    dependency_status = None
 
-    The durable host workspace is never writable from executed code.
-    Each execution receives an ephemeral writable copy in /runtime instead.
-    """
+    if user_id is not None and run_id is not None:
+        try:
+            from app.services.agent_environment import (
+                ENV_PROFILE_PROJECT,
+                environment_status_for_run,
+                get_agent_run_environment,
+                project_environment_allowed,
+            )
+
+            environment = get_agent_run_environment(user_id, run_id)
+            profile_name = environment.get("profile") or "strict"
+            dependency_installation = bool(
+                profile_name == ENV_PROFILE_PROJECT
+                and project_environment_allowed(user_id, run_id)
+            )
+            dependency_status = environment_status_for_run(user_id, run_id)
+        except Exception:
+            dependency_installation = False
+
     return {
+        "profile": profile_name,
         "source_mount": "/workspace",
         "source_read_only": True,
         "runtime_workdir": "/runtime",
@@ -208,13 +227,20 @@ def sandbox_runtime_profile():
         "tmp_dir": "/tmp",
         "tmp_writable": True,
         "network": False,
+        "execution_network": False,
+        "setup_network": bool(dependency_installation),
         "runs_as_root": False,
         "python_image": SANDBOX_IMAGE,
-        "dependency_installation": False,
+        "dependency_installation": dependency_installation,
+        "dependency_status": dependency_status,
         "dependency_note": (
-            "Only packages already present in the sandbox image are importable. "
-            "Third-party packages such as Flask are unavailable unless the configured "
-            "sandbox image already contains them."
+            "Project profile may download sanitized requirements during a separate "
+            "isolated Docker build; normal execution remains network-disabled."
+            if dependency_installation
+            else (
+                "Strict profile uses only packages already present in the base image. "
+                "Third-party dependency download is disabled."
+            )
         ),
     }
 
@@ -451,6 +477,7 @@ def _record_execution(
     duration_ms,
     stdout_text,
     stderr_text,
+    image=None,
 ):
     conn = get_connection()
     cur = conn.cursor()
@@ -467,7 +494,7 @@ def _record_execution(
             int(user_id),
             int(step_id) if step_id else None,
             filename,
-            SANDBOX_IMAGE,
+            str(image or SANDBOX_IMAGE),
             status,
             exit_code,
             int(duration_ms),
@@ -541,6 +568,10 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
     if safe_name not in _latest_files(user_id, run_id):
         raise AgentSandboxError(f"Python workspace file was not found: {safe_name}")
 
+    from app.services.agent_environment import resolve_execution_image
+
+    execution_image = resolve_execution_image(user_id, run_id)
+
     execution_id, bundle = _bundle(user_id, run_id)
     if not (bundle / safe_name).is_file():
         shutil.rmtree(bundle, ignore_errors=True)
@@ -583,7 +614,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
         "--mount", f"type=bind,source={bundle},target=/workspace,readonly",
         "--workdir", "/runtime",
         "--user", "65534:65534",
-        SANDBOX_IMAGE,
+        execution_image,
         "sh", "-lc", runtime_script, "atlas-runtime", safe_name,
     ]
 
@@ -661,6 +692,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
                 duration_ms,
                 stdout_text,
                 stderr_text,
+                image=execution_image,
             )
         finally:
             shutil.rmtree(bundle, ignore_errors=True)
@@ -673,7 +705,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
         "duration_ms": duration_ms,
         "stdout": stdout_text[:SANDBOX_MAX_STDOUT_CHARS],
         "stderr": stderr_text[:SANDBOX_MAX_STDERR_CHARS],
-        "image": SANDBOX_IMAGE,
+        "image": execution_image,
     }
 
 
@@ -686,7 +718,8 @@ def format_execution_observation(execution):
             + (f" · exit code {execution.get('exit_code')}" if execution.get("exit_code") is not None else "")
             + (f" · {execution.get('duration_ms')} ms" if execution.get("duration_ms") is not None else "")
         ),
-        "Security: Docker container, network disabled, durable source mounted read-only; execution runs from a writable disposable runtime copy.",
+        "Security: Docker container, execution network disabled, durable source mounted read-only; execution runs from a writable disposable runtime copy.",
+        f"Environment image: {execution.get('image')}",
         "\nSTDOUT:\n" + (str(execution.get("stdout") or "").strip() or "[empty]"),
     ]
     stderr_text = str(execution.get("stderr") or "").strip()
