@@ -1,0 +1,144 @@
+.atlas-revision-section {
+    border-color: var(--border);
+}
+
+.atlas-revision-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.atlas-revision-heading h3 {
+    margin: 0;
+}
+
+.atlas-revision-heading small {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+}
+
+.atlas-revision-form {
+    display: grid;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.atlas-revision-form textarea,
+.atlas-revision-form select {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 11px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.atlas-revision-options {
+    display: grid;
+    grid-template-columns:
+        minmax(180px, 0.7fr)
+        minmax(0, 1.3fr);
+    gap: 10px;
+}
+
+.atlas-revision-options > label {
+    display: grid;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.atlas-revision-learn {
+    display: flex !important;
+    align-items: center;
+    gap: 8px !important;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+}
+
+.atlas-revision-learn input {
+    width: auto;
+}
+
+.atlas-revision-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.atlas-revision-history {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.atlas-revision-history-title {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.atlas-revision-item {
+    display: grid;
+    gap: 7px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+}
+
+.atlas-revision-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.atlas-revision-item-top span {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.atlas-revision-feedback {
+    line-height: 1.45;
+}
+
+.atlas-revision-item > small {
+    color: var(--muted);
+}
+
+.atlas-revision-item details {
+    border-top: 1px solid var(--border);
+    padding-top: 7px;
+}
+
+.atlas-revision-item summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.atlas-revision-item pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 260px;
+    overflow: auto;
+    margin: 8px 0 0;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12px;
+}
+
+@media (max-width: 720px) {
+    .atlas-revision-heading,
+    .atlas-revision-options {
+        display: flex;
+        flex-direction: column;
+    }
+}

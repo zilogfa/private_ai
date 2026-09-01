@@ -31,6 +31,9 @@ SANDBOX_MEMORY = os.environ.get(
 SANDBOX_CPUS = os.environ.get(
     "PRIVATE_AI_AGENT_SANDBOX_CPUS", "1.0"
 ).strip()
+SANDBOX_RUNTIME_TMPFS = os.environ.get(
+    "PRIVATE_AI_AGENT_SANDBOX_RUNTIME_TMPFS", "128m"
+).strip()
 SANDBOX_MAX_WORKSPACE_FILES = int(
     os.environ.get("PRIVATE_AI_AGENT_SANDBOX_MAX_FILES", "20")
 )
@@ -188,6 +191,34 @@ def _quick(command, timeout=4):
         return None, str(exc)
 
 
+def sandbox_runtime_profile():
+    """
+    Deterministic capability profile for planners/controllers.
+
+    The durable host workspace is never writable from executed code.
+    Each execution receives an ephemeral writable copy in /runtime instead.
+    """
+    return {
+        "source_mount": "/workspace",
+        "source_read_only": True,
+        "runtime_workdir": "/runtime",
+        "runtime_writable": True,
+        "runtime_ephemeral": True,
+        "runtime_tmpfs": SANDBOX_RUNTIME_TMPFS,
+        "tmp_dir": "/tmp",
+        "tmp_writable": True,
+        "network": False,
+        "runs_as_root": False,
+        "python_image": SANDBOX_IMAGE,
+        "dependency_installation": False,
+        "dependency_note": (
+            "Only packages already present in the sandbox image are importable. "
+            "Third-party packages such as Flask are unavailable unless the configured "
+            "sandbox image already contains them."
+        ),
+    }
+
+
 def sandbox_status(force=False):
     now = time.monotonic()
     if (
@@ -231,7 +262,7 @@ def sandbox_status(force=False):
                 "image_ready": image_ready,
                 "image": SANDBOX_IMAGE,
                 "message": (
-                    "Docker Python sandbox is ready. Network access is disabled inside executions."
+                    "Docker Python sandbox is ready. Executions use a writable disposable runtime copy; network access is disabled."
                     if image_ready
                     else f"Sandbox image is not installed. Run: docker pull {SANDBOX_IMAGE}"
                 ),
@@ -506,7 +537,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
 
     safe_name, suffix = _safe_name(filename)
     if suffix != ".py":
-        raise AgentSandboxError("v1.10 sandbox execution supports Python files only.")
+        raise AgentSandboxError("ATLAS sandbox execution currently supports Python entry files only.")
     if safe_name not in _latest_files(user_id, run_id):
         raise AgentSandboxError(f"Python workspace file was not found: {safe_name}")
 
@@ -516,6 +547,24 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
         raise AgentSandboxError(f"Python workspace file was not materialized: {safe_name}")
 
     container_name = f"private-ai-agent-{str(run_id)[:8]}-{execution_id[:8]}"
+    # Security model:
+    # - /workspace is the immutable host-backed source snapshot.
+    # - /runtime is a disposable tmpfs copy owned by the unprivileged container user.
+    #   Programs may create JSON, SQLite DBs, caches, generated files, Flask runtime
+    #   files, etc. without ever mutating the durable host workspace.
+    # - /tmp is independently writable for tempfile and test fixtures.
+    runtime_script = (
+        "set -eu; "
+        "cp -R /workspace/. /runtime/; "
+        # /runtime itself is the Docker-created tmpfs root and is owned by root.
+        # The unprivileged execution user must not chmod that mountpoint.
+        # Files/directories copied INTO it are owned by the execution user and
+        # can safely be made writable.
+        "find /runtime -mindepth 1 -exec chmod u+rwX {} +; "
+        "cd /runtime; "
+        "exec python -B \"$1\""
+    )
+
     command = [
         "docker", "run", "--rm", "--name", container_name,
         "--network", "none",
@@ -525,15 +574,17 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true",
         "--read-only",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+        "--tmpfs", f"/runtime:rw,exec,nosuid,nodev,size={SANDBOX_RUNTIME_TMPFS},mode=1777",
         "--env", "HOME=/tmp",
+        "--env", "TMPDIR=/tmp",
         "--env", "PYTHONDONTWRITEBYTECODE=1",
         "--env", "PYTHONUNBUFFERED=1",
         "--mount", f"type=bind,source={bundle},target=/workspace,readonly",
-        "--workdir", "/workspace",
+        "--workdir", "/runtime",
         "--user", "65534:65534",
         SANDBOX_IMAGE,
-        "python", "-B", safe_name,
+        "sh", "-lc", runtime_script, "atlas-runtime", safe_name,
     ]
 
     started = time.monotonic()
@@ -635,7 +686,7 @@ def format_execution_observation(execution):
             + (f" · exit code {execution.get('exit_code')}" if execution.get("exit_code") is not None else "")
             + (f" · {execution.get('duration_ms')} ms" if execution.get("duration_ms") is not None else "")
         ),
-        "Security: Docker container, network disabled, workspace mounted read-only.",
+        "Security: Docker container, network disabled, durable source mounted read-only; execution runs from a writable disposable runtime copy.",
         "\nSTDOUT:\n" + (str(execution.get("stdout") or "").strip() or "[empty]"),
     ]
     stderr_text = str(execution.get("stderr") or "").strip()

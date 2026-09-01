@@ -35,6 +35,12 @@ from app.services.user_onboarding import (
 from app.services.agent_identity import (
     initialize_agent_identity_storage,
 )
+from app.services.agent_revision import (
+    initialize_agent_revision_storage,
+)
+from app.services.agent_project_planner import (
+    initialize_agent_project_planner_storage,
+)
 
 
 def _load_or_create_secret_key():
@@ -60,7 +66,6 @@ def _load_or_create_secret_key():
 def create_app():
     """Flask application factory. The browser layer remains separate from AI services."""
 
-    # v2.0.2 expands finite Agent budgets before controller modules are loaded.
     apply_agent_budget_upgrade()
 
     initialize_database()
@@ -76,6 +81,8 @@ def create_app():
     initialize_library_storage()
     initialize_user_onboarding_storage()
     initialize_agent_identity_storage()
+    initialize_agent_revision_storage()
+    initialize_agent_project_planner_storage()
     recover_stale_agent_runs()
 
     app = Flask(
@@ -85,8 +92,6 @@ def create_app():
         static_url_path="/static",
     )
 
-    # Chat attachments retain their own 25 MB service validation. The global
-    # Flask ceiling is larger so the direct local Library can hold future media.
     app.config.update(
         SECRET_KEY=_load_or_create_secret_key(),
         MAX_CONTENT_LENGTH=max(
@@ -103,8 +108,6 @@ def create_app():
     init_auth(app)
     init_user_onboarding(app)
 
-    # v2.1 must link a run to its persistent Agent identity before the
-    # agent API imports create_agent_run and starts its worker.
     from app.services.agent_identity_runtime import (
         apply_agent_identity_runtime,
     )
@@ -124,12 +127,19 @@ def create_app():
     from app.api.agent_routes import agent_api_bp
     from app.api.resource_routes import resource_api_bp
     from app.api.agent_identity_routes import agent_identity_api_bp
+    from app.api.agent_revision_routes import agent_revision_api_bp
 
-    # Preserve the committed v1.9.2 research/evidence behavior. The v2.0
-    # execution runner reuses those patched research/finalization helpers.
     from app.services.agent_research_upgrade import apply_agent_research_upgrade
 
     apply_agent_research_upgrade()
+
+    # Apply AFTER identity + research wrappers so revision finalization becomes
+    # the outermost completion hook and sees the actual persisted final result.
+    from app.services.agent_revision_runtime import (
+        apply_agent_revision_runtime,
+    )
+
+    apply_agent_revision_runtime()
 
     register_image_chat_interceptor(app)
 
@@ -146,6 +156,7 @@ def create_app():
     app.register_blueprint(agent_api_bp)
     app.register_blueprint(resource_api_bp)
     app.register_blueprint(agent_identity_api_bp)
+    app.register_blueprint(agent_revision_api_bp)
 
     @app.context_processor
     def inject_product_context():

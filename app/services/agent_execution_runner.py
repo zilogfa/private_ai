@@ -26,6 +26,22 @@ from app.services.agent_sandbox import (
     run_python_sandbox,
     write_workspace_file,
 )
+from app.services.agent_project_planner import (
+    active_plan_blocks_on_environment,
+    active_plan_matches_current_failure,
+    analyze_project_state,
+    create_debug_plan,
+    execute_project_repair,
+    format_debug_plan,
+    get_active_debug_plan,
+    get_next_project_repair,
+    mark_active_plan_exhausted,
+    mark_active_plan_resolved,
+    mark_active_plan_superseded,
+    project_planner_context,
+    should_create_debug_plan,
+    structured_planner_exhausted_for_current_failure,
+)
 
 _CODE_GOAL_RE = re.compile(
     r"\b(?:code|coding|python|script|program|app|application|algorithm|function|"
@@ -71,6 +87,228 @@ def _execution_catalog(run):
     return "\n\n".join(blocks)[-10000:]
 
 
+def _workspace_debug_context(
+    run,
+    max_total_chars=12000,
+    max_file_chars=4000,
+):
+    """
+    Give the local controller a bounded snapshot of the current Python project.
+
+    Multi-file failures often come from contracts spread across imports,
+    implementations and tests. Filenames alone are not enough for an 8B
+    controller to reason reliably about those relationships.
+
+    This stays entirely local and is never sent to the public-only web-query
+    planner.
+    """
+    files = list_workspace_files(
+        run["user_id"],
+        run["id"],
+    )
+
+    python_names = [
+        str(item.get("filename") or "").strip()
+        for item in files
+        if str(item.get("filename") or "").lower().endswith(".py")
+    ]
+
+    if not python_names:
+        return "No Python workspace files."
+
+    available = {
+        name: name
+        for name in python_names
+        if name
+    }
+
+    priority = []
+
+    def add(name):
+        if (
+            name
+            and name in available
+            and name not in priority
+        ):
+            priority.append(name)
+
+    state = _latest_execution_state(run)
+    latest = state.get("execution")
+
+    if latest:
+        add(
+            str(
+                latest.get("filename")
+                or ""
+            ).strip()
+        )
+
+        stderr = str(
+            latest.get("stderr")
+            or ""
+        )
+
+        # Traceback filenames.
+        for match in re.findall(
+            r'File "[^"]*/([^/"]+\.py)"',
+            stderr,
+        ):
+            add(match)
+
+        # Imported local modules implicated by ImportError/tracebacks.
+        for module in re.findall(
+            r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\s+import\b",
+            stderr,
+        ):
+            add(
+                module
+                + ".py"
+            )
+
+        for module in re.findall(
+            r"\bimport\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+            stderr,
+        ):
+            add(
+                module
+                + ".py"
+            )
+
+    # Tests are especially useful for understanding the expected contract.
+    for name in python_names:
+        if (
+            name.lower().startswith("test_")
+            or name.lower().endswith("_test.py")
+            or name.lower() in {
+                "tests.py",
+                "test.py",
+            }
+        ):
+            add(name)
+
+    # For small projects include the rest. This is the common ATLAS workspace
+    # case and is much more useful than making the model guess interfaces.
+    for name in python_names:
+        add(name)
+
+    blocks = []
+    used = 0
+
+    for name in priority:
+        if used >= max_total_chars:
+            break
+
+        try:
+            content = read_workspace_file(
+                run["user_id"],
+                run["id"],
+                name,
+                max_chars=max_file_chars,
+            )
+        except Exception:
+            continue
+
+        remaining = max_total_chars - used
+        content = str(
+            content
+            or ""
+        )[:remaining]
+
+        block = (
+            f"--- {name} ---\n"
+            + content
+        )
+
+        blocks.append(block)
+        used += len(block)
+
+    return (
+        "\n\n".join(blocks)
+        if blocks
+        else "Python workspace files could not be read."
+    )
+
+
+def _deterministic_unverified_answer(
+    run,
+    state,
+):
+    """
+    Never let model prose overrule the actual sandbox ledger.
+
+    A failed/latest-untested revision can still be a useful completed *run
+    cycle*, but it is not a verified successful implementation.
+    """
+    latest = state.get(
+        "execution"
+    )
+
+    if latest is None:
+        return (
+            "NOT VERIFIED — No successful sandbox validation exists for the "
+            "current workspace. The run ended before the implementation could "
+            "be verified. Use Continue / Revise to keep working in the same run."
+        )
+
+    filename = str(
+        latest.get(
+            "filename"
+        )
+        or "workspace test"
+    )
+
+    if state.get(
+        "writes_after"
+    ):
+        return (
+            "NOT VERIFIED — The workspace was modified after its latest sandbox "
+            f"execution ({filename}), so the current revision still requires a "
+            "re-test. The run reached its current step budget before verification. "
+            "Use Continue / Revise to continue the same workspace."
+        )
+
+    status = str(
+        latest.get(
+            "status"
+        )
+        or "unknown"
+    )
+
+    exit_code = latest.get(
+        "exit_code"
+    )
+
+    stderr = str(
+        latest.get(
+            "stderr"
+        )
+        or ""
+    ).strip()
+
+    # The tail normally contains the actual exception/assertion instead of
+    # pages of traceback setup.
+    blocker = stderr[-1400:]
+
+    answer = (
+        "NOT VERIFIED — The current workspace did not pass its latest sandbox "
+        f"validation ({filename}: status {status}, exit code {exit_code}). "
+        "The run reached its current step budget before a verified pass."
+    )
+
+    if blocker:
+        answer += (
+            "\n\nLatest blocker:\n"
+            + blocker
+        )
+
+    answer += (
+        "\n\nUse Continue / Revise to continue this same Agent run with the "
+        "existing workspace and history."
+    )
+
+    return answer
+
+
 def _available_actions(run):
     actions = list(base_runner._available_actions(run))
     if _code_enabled(run):
@@ -114,6 +352,49 @@ def _has_successful_execution(run):
     )
 
 
+def _step_changed_workspace(step):
+    """
+    A successful write_file OR planner-guided repair can invalidate the last
+    test result.
+
+    v2.1.1b only looked for write_file. That meant project_repair could rewrite
+    one or several files while the retest guard still believed nothing changed,
+    allowing stale repair sequences to run without verification.
+    """
+    if str(
+        step.get(
+            "status"
+        )
+        or ""
+    ) != "completed":
+        return False
+
+    action = str(
+        step.get(
+            "action"
+        )
+        or ""
+    )
+
+    if action == "write_file":
+        return True
+
+    if action == "project_repair":
+        output = str(
+            step.get(
+                "output"
+            )
+            or ""
+        )
+
+        return (
+            "Planner-guided repair updated "
+            in output
+        )
+
+    return False
+
+
 def _latest_execution_state(run):
     """
     Return the latest sandbox execution plus whether workspace code changed
@@ -151,9 +432,15 @@ def _latest_execution_state(run):
         step
         for step in steps
         if (
-            str(step.get("action") or "") == "write_file"
-            and str(step.get("status") or "") == "completed"
-            and int(step.get("step_index") or 0) > step_index
+            _step_changed_workspace(
+                step
+            )
+            and int(
+                step.get(
+                    "step_index"
+                )
+                or 0
+            ) > step_index
         )
     ]
 
@@ -243,6 +530,7 @@ def _sandbox_forced_final(run):
     deterministic verification state so it cannot truthfully claim tests pass
     when they were never re-run.
     """
+    state = _latest_execution_state(run)
     verification = _sandbox_verification_summary(run)
 
     system_prompt = (
@@ -264,6 +552,8 @@ def _sandbox_forced_final(run):
         + verification
         + "\n\nWORKSPACE FILES:\n"
         + _workspace_catalog(run)
+        + "\n\nPROJECT CONTRACT / DEBUG STATE:\n"
+        + project_planner_context(run)
         + "\n\nSANDBOX EXECUTION HISTORY:\n"
         + _execution_catalog(run)
         + "\n\nSOURCE CATALOG:\n"
@@ -284,6 +574,14 @@ def _sandbox_forced_final(run):
         raw,
         "sandbox agent finalizer",
     )
+
+    # Model wording can never override recorded execution truth.
+    if not state.get("verified"):
+        data["answer"] = _deterministic_unverified_answer(
+            run,
+            state,
+        )
+
     return base_runner._finish_with_final(run, data)
 
 
@@ -310,6 +608,159 @@ def _plan_next_action(run):
             "model": "deterministic",
         }
 
+    # v2.1.1b: maintain a persistent project contract and use it to stop the
+    # normal 8B loop from repeatedly guessing at the same cross-file failure.
+    project_analysis = analyze_project_state(run)
+    project_execution = project_analysis["execution"]
+    project_latest = project_execution.get("latest")
+
+    if (
+        project_latest
+        and str(project_latest.get("status") or "") == "success"
+        and int(project_latest.get("exit_code") or 0) == 0
+    ):
+        mark_active_plan_resolved(
+            run["user_id"],
+            run["id"],
+        )
+
+    # Every planner-guided code repair is now re-tested before another repair.
+    # If that test produces a DIFFERENT failure fingerprint, the previous plan
+    # did useful work but is now stale. Discard its remaining sequence and build
+    # a fresh plan around the new reality instead of applying old assumptions.
+    active_plan = get_active_debug_plan(
+        run["user_id"],
+        run["id"],
+    )
+
+    current_failure_fingerprint = (
+        project_execution[
+            "failure"
+        ].get(
+            "fingerprint"
+        )
+    )
+
+    if (
+        active_plan
+        and project_latest
+        and not (
+            str(
+                project_latest.get(
+                    "status"
+                )
+                or ""
+            )
+            == "success"
+            and int(
+                project_latest.get(
+                    "exit_code"
+                )
+                or 0
+            )
+            == 0
+        )
+        and not active_plan_matches_current_failure(
+            run["user_id"],
+            run["id"],
+            current_failure_fingerprint,
+        )
+    ):
+        mark_active_plan_superseded(
+            run["user_id"],
+            run["id"],
+        )
+
+        active_plan = None
+
+    planned_repair = get_next_project_repair(
+        run["user_id"],
+        run["id"],
+    )
+
+    if (
+        planned_repair
+        and project_latest
+        and not (
+            str(project_latest.get("status") or "") == "success"
+            and int(project_latest.get("exit_code") or 0) == 0
+        )
+        and remaining > 0
+    ):
+        return {
+            "action": "project_repair",
+            "reason": (
+                "Follow the persistent project-contract recovery plan instead "
+                "of making another unstructured cross-file guess."
+            ),
+            "model": planned_repair["plan"]["planner_model"],
+            "plan_id": planned_repair["plan"]["id"],
+            "repair_index": planned_repair["repair_index"],
+            "filename": planned_repair["repair"].get("file"),
+        }
+
+    if (
+        active_plan
+        and project_latest
+        and not planned_repair
+        and not active_plan["plan"].get("blocked_by_environment")
+    ):
+        # The prior structured repair sequence has been consumed but the test
+        # still fails. Close it so a fresh plan can use the new failure state.
+        mark_active_plan_exhausted(
+            run["user_id"],
+            run["id"],
+        )
+
+    if (
+        project_latest
+        and structured_planner_exhausted_for_current_failure(
+            run,
+            project_analysis,
+        )
+    ):
+        return {
+            "action": "final",
+            "reason": (
+                "The structured planner has already attempted multiple recovery "
+                "plans against the same unchanged failure. Stop the loop and "
+                "report the exact blocker instead of spending more steps on the "
+                "same hypothesis."
+            ),
+            "model": "deterministic",
+        }
+
+    if (
+        project_latest
+        and should_create_debug_plan(
+            run,
+            project_analysis,
+        )
+        and remaining > 0
+    ):
+        return {
+            "action": "project_plan",
+            "reason": (
+                "Build a structured project contract/recovery plan because "
+                "the current failure is cross-file, repeated, or stalled."
+            ),
+            "model": "adaptive",
+        }
+
+    if active_plan_blocks_on_environment(
+        run["user_id"],
+        run["id"],
+    ):
+        return {
+            "action": "final",
+            "reason": (
+                "The structured project plan identified a sandbox environment "
+                "dependency blocker. Preserve the requested architecture and "
+                "report the limitation instead of rewriting it away."
+            ),
+            "model": "deterministic",
+        }
+
     system_prompt = (
         "You are the controller for a persistent private local AI agent with a "
         "controlled Docker Python sandbox. Choose exactly ONE next action. Do useful "
@@ -320,6 +771,14 @@ def _plan_next_action(run):
         "workspace changes, prefer final unless the goal explicitly requires unfinished "
         "work. Never spend remaining steps rewriting the same already-tested file without "
         "a concrete reason.\n\n"
+        "MULTI-FILE CONTRACTS:\n"
+        "ATLAS now maintains a deterministic PROJECT CONTRACT containing modules, imports, "
+        "symbols, signatures, callers, tests, failure fingerprints and progress state. Use it "
+        "as authoritative structural evidence. For import errors, missing symbols, constructor/"
+        "signature mismatches, or tests that disagree with implementation, reconcile the whole "
+        "contract. Do not ping-pong rename one file while leaving callers/tests inconsistent. "
+        "If a structured debug plan exists, follow it rather than inventing a competing repair. "
+        "Prefer the smallest coherent cross-file repair.\n\n"
         "CODING LOOP:\n"
         "When runnable code is requested and sandbox execution is allowed, prefer an "
         "engineering loop: create/update file(s) -> execute/test -> inspect stdout/stderr "
@@ -364,6 +823,10 @@ def _plan_next_action(run):
         + f"\n\nSTEP BUDGET REMAINING: {remaining}"
         + "\n\nWORKSPACE FILES:\n"
         + _workspace_catalog(run)
+        + "\n\nPERSISTENT PROJECT CONTRACT / DEBUG STATE:\n"
+        + project_planner_context(run, project_analysis)
+        + "\n\nCURRENT WORKSPACE CONTENT (LOCAL, BOUNDED):\n"
+        + _workspace_debug_context(run)
         + "\n\nSANDBOX EXECUTION HISTORY:\n"
         + _execution_catalog(run)
         + "\n\nSOURCE CATALOG:\n"
@@ -384,8 +847,10 @@ def _plan_next_action(run):
                     last_error
                     or "missing required action data"
                 )
-                + "\nRe-plan from the current workspace and ledger. "
-                + "Do not repeat the invalid action. Return strict JSON only."
+                + "\nRe-plan from the current workspace, CURRENT WORKSPACE CONTENT, "
+                + "execution history and ledger. Do not repeat the invalid action. "
+                + "For multi-file failures, reconcile the implementation/test contract "
+                + "before editing. Return strict JSON only."
             )
 
         raw, model = base_runner._run_model(
@@ -554,6 +1019,19 @@ def _execute_run_python(run, step, filename):
     return format_execution_observation(execution)[: base_runner.AGENT_STEP_OUTPUT_LIMIT]
 
 
+def _execute_project_plan(run):
+    analysis = analyze_project_state(run)
+    plan = create_debug_plan(
+        run,
+        analysis,
+    )
+    return format_debug_plan(plan)
+
+
+def _execute_project_repair(run):
+    return execute_project_repair(run)
+
+
 def execute_agent_run(user_id, run_id):
     """
     Runs without code opt-in continue through the exact v1.9/v1.9.2 runner.
@@ -585,6 +1063,93 @@ def execute_agent_run(user_id, run_id):
                 )
 
             if int(run.get("current_step") or 0) >= int(run.get("max_steps") or 6):
+                # Verification tail:
+                # If the final nominal step changed the workspace, grant exactly
+                # one deterministic sandbox verification step. This does not give
+                # the LLM another planning/editing step; it only tests the current
+                # revision so a run never ends merely because the repair consumed
+                # the last budget slot.
+                retest_target = _required_retest_target(run)
+
+                if (
+                    retest_target
+                    and "run_python" in _available_actions(run)
+                ):
+                    verification_step = begin_agent_step(
+                        user_id,
+                        run_id,
+                        phase="verification",
+                        action="run_python",
+                        tool_name="agent.sandbox.python",
+                        reason=(
+                            "Mandatory final verification of the workspace revision "
+                            "created on the last nominal step."
+                        ),
+                        input_data={
+                            "filename": retest_target,
+                            "verification_tail": True,
+                        },
+                    )
+
+                    verification_output = ""
+                    verification_status = "completed"
+
+                    try:
+                        verification_output = _execute_run_python(
+                            run,
+                            verification_step,
+                            retest_target,
+                        )
+                    except AgentSandboxError as error:
+                        verification_output = (
+                            f"Sandbox action could not complete: {error}"
+                        )
+                        verification_status = "error"
+                    except Exception as error:
+                        if isinstance(
+                            error,
+                            base_runner.AgentCancelled,
+                        ):
+                            raise
+
+                        verification_output = (
+                            f"Action error: {error}"
+                        )
+                        verification_status = "error"
+
+                    verification_output = str(
+                        verification_output
+                        or ""
+                    )[:base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
+                    finish_agent_step(
+                        user_id,
+                        verification_step["id"],
+                        verification_status,
+                        verification_output,
+                    )
+
+                    base_runner._log_step(
+                        run,
+                        verification_step,
+                        {
+                            "action": "run_python",
+                            "filename": retest_target,
+                            "verification_tail": True,
+                            "reason": (
+                                "Mandatory final verification of the workspace "
+                                "revision created on the last nominal step."
+                            ),
+                        },
+                        verification_output,
+                        verification_status,
+                    )
+
+                    run = get_agent_run(
+                        user_id,
+                        run_id,
+                    ) or run
+
                 _sandbox_forced_final(run)
                 return
 
@@ -600,6 +1165,8 @@ def execute_agent_run(user_id, run_id):
                 "workspace_list": "agent.workspace.list",
                 "workspace_read": "agent.workspace.read",
                 "run_python": "agent.sandbox.python",
+                "project_plan": "agent.project.plan",
+                "project_repair": "agent.project.repair",
                 "final": "agent.finalize",
                 "needs_input": "agent.input.request",
             }.get(action)
@@ -642,6 +1209,10 @@ def execute_agent_run(user_id, run_id):
                     output = _execute_workspace_read(run, action_data.get("filename"))
                 elif action == "run_python":
                     output = _execute_run_python(run, step, action_data.get("filename"))
+                elif action == "project_plan":
+                    output = _execute_project_plan(run)
+                elif action == "project_repair":
+                    output = _execute_project_repair(run)
                 elif action == "needs_input":
                     question = str(
                         action_data.get("question")
