@@ -600,8 +600,9 @@ def _sandbox_forced_final(run):
         "You may say tests/code passed only when it says VERIFIED. "
         "If it says NOT VERIFIED, clearly state that the current workspace "
         "still requires a successful re-test and describe the latest observed "
-        "failure or remaining work. Return ONLY JSON with keys: answer (string), "
-        "evidence (array), artifacts (array)."
+        "failure or remaining work. The answer string may use concise Markdown headings, "
+        "lists, tables, and code blocks when they improve clarity. Return ONLY JSON with "
+        "keys: answer (string), evidence (array), artifacts (array)."
     )
 
     user_prompt = (

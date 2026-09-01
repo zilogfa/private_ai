@@ -38,6 +38,7 @@ from app.services.agent_environment import (
     set_agent_run_environment_profile,
 )
 from app.services.rag import has_indexed_documents
+from app.services.markdown import render_markdown
 
 agent_api_bp = Blueprint("agent_api", __name__, url_prefix="/api/agents")
 
@@ -101,8 +102,21 @@ def _run_detail(user_id, run_id):
     run = get_agent_run(user_id, run_id)
     if not run:
         return None
+
+    result_text = str(
+        run.get("result")
+        or ""
+    )
+
     return {
         "run": _decorate_run(user_id, run),
+        "rendered_result_html": (
+            render_markdown(
+                result_text
+            )
+            if result_text
+            else None
+        ),
         "steps": list_agent_steps(user_id, run_id),
         "sources": list_agent_sources(user_id, run_id),
         "document_sources": list_agent_document_sources(user_id, run_id),

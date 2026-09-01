@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Agent Workspace · Private AI{% endblock %}
+{% block title %}Agent Workspace · {{ product.name }}{% endblock %}
 {% block body_class %}agent-body{% endblock %}
 {% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
 {% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
@@ -43,7 +43,7 @@
                 <div>
                     <h2>Start an agent run</h2>
                     <p>
-                        Give Private AI a goal. The agent can research, create files,
+                        Give ATLAS a goal. The agent can research, create files,
                         and when explicitly allowed, test Python inside its sandbox.
                     </p>
                 </div>
@@ -107,7 +107,7 @@
                         </label>
 
                         <label class="agent-environment-profile-row">
-                            <span>Sandbox environment</span>
+                            <span>Python sandbox environment</span>
                             <select id="agentSandboxProfile" {% if not can_code %}disabled{% endif %}>
                                 <option value="strict" selected>Strict · safest default</option>
                                 <option value="project">Project · dependency-enabled</option>
@@ -122,7 +122,7 @@
                 </div>
 
                 <div class="agent-foundation-note">
-                    <strong>v2.2 execution boundary</strong>
+                    <strong>v2.2.1 execution boundary</strong>
                     <span>
                         Code execution is opt-in per run. Strict mode never downloads dependencies.
                         Project mode may contact the Python package index only during a separate,
@@ -195,6 +195,21 @@
             </div>
 
             <aside class="agent-detail-side">
+                <section
+                    id="agentEnvironmentSection"
+                    class="agent-detail-section compact-section agent-environment-section"
+                    hidden
+                >
+                    <div class="section-heading-row">
+                        <h3>Environment</h3>
+                        <span id="agentEnvironmentState" class="agent-environment-state"></span>
+                    </div>
+
+                    <div id="agentEnvironmentLive" class="agent-environment-live"></div>
+                    <div id="agentEnvironmentDependencies" class="agent-environment-dependencies"></div>
+                    <div id="agentEnvironmentBuilds" class="agent-environment-builds"></div>
+                </section>
+
                 <section class="agent-detail-section compact-section">
                     <h3>Evidence</h3>
                     <div id="agentEvidenceList" class="agent-evidence-list"></div>

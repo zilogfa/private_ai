@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -251,6 +252,39 @@ def initialize_agent_environment_storage():
         ON agent_environment_builds(
             run_id,
             created_at
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_environment_activity (
+            run_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            build_id TEXT,
+            status TEXT NOT NULL DEFAULT 'idle',
+            stage TEXT NOT NULL DEFAULT 'idle',
+            detail TEXT,
+            progress INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            finished_at TEXT,
+            FOREIGN KEY (run_id)
+                REFERENCES agent_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (user_id)
+                REFERENCES users(id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_environment_activity_user
+        ON agent_environment_activity(
+            user_id,
+            updated_at
         )
         """
     )
@@ -518,11 +552,16 @@ def _docker_image_exists(image_tag):
 
 def environment_status_for_run(user_id, run_id):
     environment = get_agent_run_environment(user_id, run_id)
+    activity = get_environment_activity(
+        user_id,
+        run_id,
+    )
     profile = environment.get("profile") or ENV_PROFILE_STRICT
 
     if profile != ENV_PROFILE_PROJECT:
         return {
             **environment,
+            "activity": activity,
             "ready": True,
             "stale": False,
             "execution_image": SANDBOX_IMAGE,
@@ -535,6 +574,7 @@ def environment_status_for_run(user_id, run_id):
     except AgentEnvironmentError as error:
         return {
             **environment,
+            "activity": activity,
             "ready": False,
             "stale": True,
             "failed_current": True,
@@ -551,6 +591,7 @@ def environment_status_for_run(user_id, run_id):
     if not requirements:
         return {
             **environment,
+            "activity": activity,
             "ready": True,
             "stale": False,
             "status": "base",
@@ -578,6 +619,7 @@ def environment_status_for_run(user_id, run_id):
 
     return {
         **environment,
+        "activity": activity,
         "ready": bool(matches),
         "stale": not matches,
         "failed_current": bool(failed_current),
@@ -979,6 +1021,285 @@ def add_missing_dependency_to_manifest(user_id, run_id):
     }
 
 
+
+def _set_environment_activity(
+    user_id,
+    run_id,
+    *,
+    build_id=None,
+    status,
+    stage,
+    detail=None,
+    progress=0,
+    started=False,
+    finished=False,
+):
+    """
+    Persist a small heartbeat/progress record that the Agent UI can poll while
+    Docker is doing long-running dependency work.
+
+    This is intentionally separate from final build history:
+    - activity = live/ephemeral status for one run
+    - agent_environment_builds = durable completed build provenance
+    """
+    initialize_agent_environment_storage()
+
+    timestamp = utc_iso()
+    progress_value = max(
+        0,
+        min(
+            100,
+            int(
+                progress
+                or 0
+            ),
+        ),
+    )
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO agent_environment_activity (
+            run_id,
+            user_id,
+            build_id,
+            status,
+            stage,
+            detail,
+            progress,
+            started_at,
+            updated_at,
+            finished_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id)
+        DO UPDATE SET
+            build_id = excluded.build_id,
+            status = excluded.status,
+            stage = excluded.stage,
+            detail = excluded.detail,
+            progress = excluded.progress,
+            started_at = CASE
+                WHEN ? THEN excluded.started_at
+                ELSE agent_environment_activity.started_at
+            END,
+            updated_at = excluded.updated_at,
+            finished_at = CASE
+                WHEN ? THEN excluded.finished_at
+                ELSE NULL
+            END
+        """,
+        (
+            str(run_id),
+            int(user_id),
+            str(build_id or "") or None,
+            str(status or "idle")[:40],
+            str(stage or "idle")[:80],
+            str(detail or "")[:1200] or None,
+            progress_value,
+            timestamp if started else None,
+            timestamp,
+            timestamp if finished else None,
+            int(bool(started)),
+            int(bool(finished)),
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_environment_activity(user_id, run_id):
+    initialize_agent_environment_storage()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            run_id,
+            build_id,
+            status,
+            stage,
+            detail,
+            progress,
+            started_at,
+            updated_at,
+            finished_at
+        FROM agent_environment_activity
+        WHERE
+            run_id = ?
+            AND user_id = ?
+        """,
+        (
+            str(run_id),
+            int(user_id),
+        ),
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return {
+            "run_id": str(run_id),
+            "build_id": None,
+            "status": "idle",
+            "stage": "idle",
+            "detail": None,
+            "progress": 0,
+            "started_at": None,
+            "updated_at": None,
+            "finished_at": None,
+        }
+
+    return {
+        "run_id": row[0],
+        "build_id": row[1],
+        "status": row[2],
+        "stage": row[3],
+        "detail": row[4],
+        "progress": int(row[5] or 0),
+        "started_at": row[6],
+        "updated_at": row[7],
+        "finished_at": row[8],
+    }
+
+
+def _classify_build_progress(line, current_progress=25):
+    """
+    Translate Docker/pip build text into stable user-facing phases.
+
+    Docker output varies by version/BuildKit, so these are deliberately broad
+    hints rather than a fake exact percentage.
+    """
+    text = str(
+        line
+        or ""
+    ).strip()
+
+    lowered = text.lower()
+
+    if not lowered:
+        return (
+            "building",
+            "Building isolated dependency image…",
+            max(
+                25,
+                int(
+                    current_progress
+                    or 25
+                ),
+            ),
+        )
+
+    rules = (
+        (
+            (
+                "load build definition",
+                "load metadata",
+            ),
+            "preparing",
+            "Preparing dependency build context…",
+            20,
+        ),
+        (
+            (
+                "load build context",
+                "transferring context",
+            ),
+            "preparing",
+            "Preparing sanitized requirements context…",
+            30,
+        ),
+        (
+            (
+                "collecting ",
+                "obtaining dependency information",
+            ),
+            "downloading",
+            "Resolving and downloading dependency wheels…",
+            48,
+        ),
+        (
+            (
+                "downloading ",
+                "using cached ",
+            ),
+            "downloading",
+            "Downloading/reusing dependency wheels…",
+            58,
+        ),
+        (
+            (
+                "installing collected packages",
+                "installing ",
+            ),
+            "installing",
+            "Installing dependencies into the isolated image…",
+            72,
+        ),
+        (
+            (
+                "successfully installed",
+            ),
+            "installing",
+            "Dependencies installed; finalizing environment…",
+            84,
+        ),
+        (
+            (
+                "exporting to image",
+                "exporting layers",
+                "writing image",
+            ),
+            "finalizing",
+            "Exporting the reusable project environment…",
+            91,
+        ),
+        (
+            (
+                "naming to ",
+            ),
+            "finalizing",
+            "Saving the content-addressed environment image…",
+            96,
+        ),
+    )
+
+    for markers, stage, detail, progress in rules:
+        if any(
+            marker in lowered
+            for marker in markers
+        ):
+            return (
+                stage,
+                detail,
+                max(
+                    int(
+                        current_progress
+                        or 0
+                    ),
+                    progress,
+                ),
+            )
+
+    return (
+        "building",
+        text[-500:],
+        max(
+            25,
+            int(
+                current_progress
+                or 25
+            ),
+        ),
+    )
+
+
 def _docker_env():
     return {
         key: value
@@ -992,68 +1313,228 @@ def _docker_env():
     }
 
 
-def _run_cancellable(command, timeout, cancel_check=None):
+def _run_cancellable(
+    command,
+    timeout,
+    cancel_check=None,
+    progress_callback=None,
+):
+    """
+    Run a child process while:
+    - streaming stdout/stderr into bounded in-memory buffers
+    - emitting progress/heartbeat callbacks
+    - polling Agent cancellation
+    - enforcing a hard setup timeout
+
+    Reading pipes continuously also prevents a verbose docker build from
+    blocking because an OS pipe buffer filled before communicate().
+    """
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
         env=_docker_env(),
     )
-    started = time.monotonic()
-    deadline = started + max(10, int(timeout))
-    timed_out = False
 
-    while process.poll() is None:
-        if cancel_check:
+    stdout_lines = []
+    stderr_lines = []
+    output_lock = threading.Lock()
+
+    def _reader(stream, sink):
+        try:
+            for line in iter(
+                stream.readline,
+                "",
+            ):
+                with output_lock:
+                    sink.append(
+                        line
+                    )
+
+                    # Keep memory bounded while retaining the useful tail.
+                    if len(
+                        sink
+                    ) > 4000:
+                        del sink[
+                            :2000
+                        ]
+        finally:
             try:
-                cancel_check()
+                stream.close()
             except Exception:
+                pass
+
+    threads = [
+        threading.Thread(
+            target=_reader,
+            args=(
+                process.stdout,
+                stdout_lines,
+            ),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_reader,
+            args=(
+                process.stderr,
+                stderr_lines,
+            ),
+            daemon=True,
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    started = time.monotonic()
+    deadline = (
+        started
+        + max(
+            10,
+            int(
+                timeout
+            ),
+        )
+    )
+
+    timed_out = False
+    last_progress_text = None
+    last_heartbeat = 0.0
+
+    try:
+        while process.poll() is None:
+            if cancel_check:
+                cancel_check()
+
+            now_mono = time.monotonic()
+
+            if progress_callback:
+                with output_lock:
+                    latest = (
+                        stderr_lines[-1]
+                        if stderr_lines
+                        else (
+                            stdout_lines[-1]
+                            if stdout_lines
+                            else ""
+                        )
+                    )
+
+                latest = str(
+                    latest
+                    or ""
+                ).strip()
+
+                if (
+                    latest
+                    and latest
+                    != last_progress_text
+                ):
+                    progress_callback(
+                        latest,
+                        False,
+                    )
+                    last_progress_text = latest
+                    last_heartbeat = now_mono
+
+                elif (
+                    now_mono
+                    - last_heartbeat
+                    >= 1.5
+                ):
+                    progress_callback(
+                        None,
+                        True,
+                    )
+                    last_heartbeat = now_mono
+
+            if now_mono >= deadline:
+                timed_out = True
                 try:
                     process.terminate()
                 except OSError:
                     pass
+
                 try:
-                    process.wait(timeout=2)
+                    process.wait(
+                        timeout=3
+                    )
                 except Exception:
                     try:
                         process.kill()
                     except OSError:
                         pass
-                raise
 
-        if time.monotonic() >= deadline:
-            timed_out = True
+                break
+
+            time.sleep(
+                0.25
+            )
+
+    except Exception:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+        try:
+            process.wait(
+                timeout=2
+            )
+        except Exception:
             try:
-                process.terminate()
+                process.kill()
             except OSError:
                 pass
-            try:
-                process.wait(timeout=3)
-            except Exception:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-            break
 
-        time.sleep(0.25)
+        raise
 
-    try:
-        stdout, stderr = process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
+    finally:
+        for thread in threads:
+            thread.join(
+                timeout=2
+            )
+
+    if process.poll() is None:
         try:
             process.kill()
         except OSError:
             pass
-        stdout, stderr = process.communicate()
+
+    try:
+        process.wait(
+            timeout=3
+        )
+    except Exception:
+        pass
+
+    with output_lock:
+        stdout = "".join(
+            stdout_lines
+        )
+        stderr = "".join(
+            stderr_lines
+        )
 
     return {
-        "returncode": process.returncode,
-        "stdout": stdout or "",
-        "stderr": stderr or "",
-        "timed_out": timed_out,
-        "duration_ms": int((time.monotonic() - started) * 1000),
+        "returncode":
+            process.returncode,
+        "stdout":
+            stdout or "",
+        "stderr":
+            stderr or "",
+        "timed_out":
+            timed_out,
+        "duration_ms":
+            int(
+                (
+                    time.monotonic()
+                    - started
+                )
+                * 1000
+            ),
     }
 
 
@@ -1222,7 +1703,27 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
             or "Docker sandbox is unavailable."
         )
 
+    _set_environment_activity(
+        user_id,
+        run_id,
+        status="running",
+        stage="validating",
+        detail="Validating the sanitized dependency manifest…",
+        progress=5,
+        started=True,
+    )
+
     requirements = current_requirements(user_id, run_id)
+
+    _set_environment_activity(
+        user_id,
+        run_id,
+        status="running",
+        stage="cache_check",
+        detail="Checking the local content-addressed environment cache…",
+        progress=12,
+    )
+
     if not requirements:
         _update_environment_state(
             user_id,
@@ -1234,6 +1735,16 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
             resolved=[],
             last_error=None,
         )
+        _set_environment_activity(
+            user_id,
+            run_id,
+            status="ready",
+            stage="base",
+            detail="No third-party dependencies were declared; using the base Python image.",
+            progress=100,
+            finished=True,
+        )
+
         return {
             "status": "base",
             "cached": True,
@@ -1246,6 +1757,16 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
     requirements_hash = _requirements_hash(requirements)
     image_tag = _image_tag(requirements_hash)
     build_id = uuid.uuid4().hex
+
+    _set_environment_activity(
+        user_id,
+        run_id,
+        build_id=build_id,
+        status="running",
+        stage="cache_check",
+        detail="Checking whether this exact dependency image already exists locally…",
+        progress=16,
+    )
 
     if _docker_image_exists(image_tag):
         resolved = _freeze_manifest(image_tag)
@@ -1273,6 +1794,17 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
             "Dependency image already existed in the local Docker cache.",
             "",
         )
+        _set_environment_activity(
+            user_id,
+            run_id,
+            build_id=build_id,
+            status="cached",
+            stage="cache_hit",
+            detail="Reused the existing content-addressed project environment.",
+            progress=100,
+            finished=True,
+        )
+
         return {
             "status": "cached",
             "cached": True,
@@ -1292,6 +1824,16 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
         resolved=[],
         last_error=None,
         increment_build=True,
+    )
+
+    _set_environment_activity(
+        user_id,
+        run_id,
+        build_id=build_id,
+        status="running",
+        stage="building",
+        detail="Starting isolated dependency image build…",
+        progress=22,
     )
 
     pip_binary_flag = " --only-binary=:all:" if ENV_ONLY_BINARY else ""
@@ -1321,6 +1863,7 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
 
         command = [
             "docker", "build",
+            "--progress=plain",
             "--network", "default",
             "--pull=false",
             "--tag", image_tag,
@@ -1329,11 +1872,71 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
             str(root),
         ]
 
-        result = _run_cancellable(
-            command,
-            ENV_SETUP_TIMEOUT_SECONDS,
-            cancel_check=cancel_check,
-        )
+        current_progress = {
+            "value": 22,
+            "stage": "building",
+            "detail": "Building isolated dependency image…",
+        }
+
+        def _progress_callback(
+            line,
+            heartbeat,
+        ):
+            if heartbeat:
+                _set_environment_activity(
+                    user_id,
+                    run_id,
+                    build_id=build_id,
+                    status="running",
+                    stage=current_progress["stage"],
+                    detail=current_progress["detail"],
+                    progress=current_progress["value"],
+                )
+                return
+
+            stage, detail, progress = _classify_build_progress(
+                line,
+                current_progress["value"],
+            )
+
+            current_progress.update({
+                "value":
+                    progress,
+                "stage":
+                    stage,
+                "detail":
+                    detail,
+            })
+
+            _set_environment_activity(
+                user_id,
+                run_id,
+                build_id=build_id,
+                status="running",
+                stage=stage,
+                detail=detail,
+                progress=progress,
+            )
+
+        try:
+            result = _run_cancellable(
+                command,
+                ENV_SETUP_TIMEOUT_SECONDS,
+                cancel_check=cancel_check,
+                progress_callback=_progress_callback,
+            )
+        except Exception:
+            _set_environment_activity(
+                user_id,
+                run_id,
+                build_id=build_id,
+                status="stopped",
+                stage="stopped",
+                detail="Dependency setup was stopped before completion.",
+                progress=current_progress["value"],
+                finished=True,
+            )
+            raise
 
     build_status = (
         "timeout"
@@ -1347,6 +1950,15 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
 
     resolved = []
     if build_status == "ready":
+        _set_environment_activity(
+            user_id,
+            run_id,
+            build_id=build_id,
+            status="running",
+            stage="resolving",
+            detail="Recording resolved dependency versions…",
+            progress=97,
+        )
         resolved = _freeze_manifest(image_tag)
 
     error_text = str(result.get("stderr") or "")[-6000:]
@@ -1380,6 +1992,42 @@ def setup_project_environment(user_id, run_id, cancel_check=None):
         resolved,
         result.get("stdout") or "",
         result.get("stderr") or "",
+    )
+
+    _set_environment_activity(
+        user_id,
+        run_id,
+        build_id=build_id,
+        status=(
+            "ready"
+            if build_status == "ready"
+            else build_status
+        ),
+        stage=(
+            "ready"
+            if build_status == "ready"
+            else build_status
+        ),
+        detail=(
+            "Project environment is ready; normal execution remains network-disabled."
+            if build_status == "ready"
+            else (
+                "Dependency setup timed out."
+                if build_status == "timeout"
+                else "Dependency setup failed."
+            )
+        ),
+        progress=(
+            100
+            if build_status == "ready"
+            else max(
+                1,
+                int(
+                    current_progress["value"]
+                ),
+            )
+        ),
+        finished=True,
     )
 
     if build_status != "ready":

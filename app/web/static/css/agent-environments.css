@@ -18,3 +18,158 @@
 .agent-environment-profile-row select:disabled {
     opacity: 0.55;
 }
+
+
+/* v2.2.1 environment observability */
+
+.agent-environment-section {
+    display: grid;
+    gap: 10px;
+}
+
+.agent-environment-state {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.agent-environment-state.environment-running {
+    color: var(--text);
+}
+
+.agent-environment-state.environment-ready,
+.agent-environment-state.environment-cached {
+    color: var(--success);
+}
+
+.agent-environment-state.environment-failed,
+.agent-environment-state.environment-timeout,
+.agent-environment-state.environment-stopped {
+    color: var(--danger);
+}
+
+.agent-environment-live,
+.agent-environment-dependencies,
+.agent-environment-builds {
+    display: grid;
+    gap: 7px;
+}
+
+.agent-environment-summary {
+    display: grid;
+    gap: 4px;
+}
+
+.agent-environment-summary small,
+.agent-environment-image,
+.agent-environment-subheading,
+.agent-environment-live-meta,
+.agent-environment-build-row small {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.agent-environment-progress-shell {
+    width: 100%;
+    height: 7px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+}
+
+.agent-environment-progress-bar {
+    height: 100%;
+    border-radius: inherit;
+    background: currentColor;
+    transition: width 180ms ease;
+}
+
+.agent-environment-live-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 5px 10px;
+}
+
+.agent-environment-image {
+    overflow-wrap: anywhere;
+}
+
+.agent-environment-subheading {
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.agent-environment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.agent-environment-chips span {
+    display: inline-flex;
+    max-width: 100%;
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    font-size: 10px;
+    overflow-wrap: anywhere;
+}
+
+.agent-environment-build-row {
+    display: grid;
+    gap: 3px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--bg);
+}
+
+.agent-environment-build-row > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.agent-environment-build-row > small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Agent final answers now reuse the same safe server-side Markdown renderer as chat. */
+
+.agent-result-rich {
+    overflow-x: auto;
+}
+
+.agent-result-rich table {
+    display: table;
+    width: 100%;
+    min-width: 520px;
+}
+
+.agent-result-rich .code-block {
+    max-width: 100%;
+}
+
+.agent-result-rich pre {
+    overflow-x: auto;
+}
+
+@media (max-width: 700px) {
+    .agent-result-rich table {
+        min-width: 460px;
+    }
+}

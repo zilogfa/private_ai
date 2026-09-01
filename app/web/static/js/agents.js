@@ -37,6 +37,11 @@
         evidenceList: document.getElementById("agentEvidenceList"),
         sourceList: document.getElementById("agentSourceList"),
         artifactList: document.getElementById("agentArtifactList"),
+        environmentSection: document.getElementById("agentEnvironmentSection"),
+        environmentState: document.getElementById("agentEnvironmentState"),
+        environmentLive: document.getElementById("agentEnvironmentLive"),
+        environmentDependencies: document.getElementById("agentEnvironmentDependencies"),
+        environmentBuilds: document.getElementById("agentEnvironmentBuilds"),
         questionSection: document.getElementById("agentQuestionSection"),
         pendingQuestion: document.getElementById("agentPendingQuestion"),
         inputForm: document.getElementById("agentInputForm"),
@@ -97,6 +102,289 @@
         if (!value) return "";
         const date = new Date(value);
         return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    }
+
+    function elapsedLabel(value) {
+        if (!value) return "";
+
+        const started = new Date(value);
+        if (Number.isNaN(started.getTime())) return "";
+
+        const seconds = Math.max(
+            0,
+            Math.round(
+                (
+                    Date.now()
+                    - started.getTime()
+                )
+                / 1000
+            ),
+        );
+
+        if (seconds < 60) {
+            return `${seconds}s`;
+        }
+
+        const minutes = Math.floor(seconds / 60);
+        const remainder = seconds % 60;
+
+        return remainder
+            ? `${minutes}m ${remainder}s`
+            : `${minutes}m`;
+    }
+
+    function enhanceRenderedResult(container) {
+        container
+            .querySelectorAll("a")
+            .forEach((link) => {
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+            });
+    }
+
+    function renderRichResult(run, renderedHtml) {
+        el.result.classList.remove(
+            "muted",
+            "error-text",
+            "rendered-markdown",
+            "agent-result-rich",
+        );
+
+        if (run.result) {
+            if (
+                typeof renderedHtml === "string"
+                && renderedHtml.trim()
+            ) {
+                el.result.innerHTML = renderedHtml;
+                el.result.classList.add(
+                    "rendered-markdown",
+                    "agent-result-rich",
+                );
+                enhanceRenderedResult(el.result);
+            } else {
+                el.result.textContent = run.result;
+            }
+
+            return;
+        }
+
+        if (run.error) {
+            el.result.textContent = run.error;
+            el.result.classList.add("error-text");
+            return;
+        }
+
+        el.result.textContent = (
+            isActiveState(run.state)
+                ? "Agent is working..."
+                : "Agent has not produced a final result yet."
+        );
+
+        el.result.classList.add("muted");
+    }
+
+    function formatEnvironmentStage(value) {
+        return ({
+            idle: "Idle",
+            validating: "Validating",
+            cache_check: "Checking cache",
+            cache_hit: "Cached",
+            preparing: "Preparing",
+            building: "Building",
+            downloading: "Downloading",
+            installing: "Installing",
+            finalizing: "Finalizing",
+            resolving: "Resolving versions",
+            ready: "Ready",
+            base: "Base image",
+            failed: "Failed",
+            timeout: "Timed out",
+            stopped: "Stopped",
+        })[value] || value || "Unknown";
+    }
+
+    function renderEnvironment(run, environment, builds) {
+        if (!el.environmentSection) return;
+
+        const visible = Boolean(run.allow_code);
+        el.environmentSection.hidden = !visible;
+
+        if (!visible) return;
+
+        environment = environment || {};
+        builds = builds || [];
+
+        const profile = environment.profile || run.sandbox_profile || "strict";
+        const activity = environment.activity || {};
+        const activeActivity = ["running"].includes(activity.status);
+
+        el.environmentState.className = (
+            "agent-environment-state "
+            + `environment-${activity.status || environment.status || "base"}`
+        );
+
+        if (profile !== "project") {
+            el.environmentState.textContent = "Strict";
+        } else if (activeActivity) {
+            el.environmentState.textContent = formatEnvironmentStage(activity.stage);
+        } else if (environment.status === "cached") {
+            el.environmentState.textContent = "Cached";
+        } else if (environment.ready) {
+            el.environmentState.textContent = "Ready";
+        } else {
+            el.environmentState.textContent = formatEnvironmentStage(
+                activity.stage || environment.status
+            );
+        }
+
+        el.environmentLive.replaceChildren();
+
+        const summary = document.createElement("div");
+        summary.className = "agent-environment-summary";
+
+        const title = document.createElement("strong");
+        title.textContent = (
+            profile === "project"
+                ? "Project · dependency-enabled"
+                : "Strict · base Python"
+        );
+
+        const detail = document.createElement("small");
+        detail.textContent = (
+            activeActivity
+                ? (
+                    activity.detail
+                    || environment.message
+                    || "Environment setup is running…"
+                )
+                : (
+                    environment.message
+                    || (
+                        profile === "project"
+                            ? "Project environment status is available."
+                            : "Strict environment uses the base Python image."
+                    )
+                )
+        );
+
+        summary.append(title, detail);
+        el.environmentLive.appendChild(summary);
+
+        if (activeActivity) {
+            const progressShell = document.createElement("div");
+            progressShell.className = "agent-environment-progress-shell";
+
+            const progressBar = document.createElement("div");
+            progressBar.className = "agent-environment-progress-bar";
+            progressBar.style.width = `${Math.max(
+                2,
+                Math.min(100, Number(activity.progress || 0)),
+            )}%`;
+
+            progressShell.appendChild(progressBar);
+            el.environmentLive.appendChild(progressShell);
+
+            const meta = document.createElement("div");
+            meta.className = "agent-environment-live-meta";
+
+            const percent = document.createElement("small");
+            percent.textContent = `${Number(activity.progress || 0)}%`;
+
+            const elapsed = document.createElement("small");
+            const elapsedText = elapsedLabel(activity.started_at);
+            elapsed.textContent = elapsedText ? `Elapsed ${elapsedText}` : "Working…";
+
+            const cancelHint = document.createElement("small");
+            cancelHint.textContent = "Stop cancels setup safely.";
+
+            meta.append(percent, elapsed, cancelHint);
+            el.environmentLive.appendChild(meta);
+        }
+
+        const image = (
+            environment.execution_image
+            || environment.image_tag
+            || environment.current_image_tag
+        );
+
+        if (image) {
+            const imageLine = document.createElement("small");
+            imageLine.className = "agent-environment-image";
+            imageLine.textContent = `Image: ${image}`;
+            el.environmentLive.appendChild(imageLine);
+        }
+
+        el.environmentDependencies.replaceChildren();
+
+        const dependencies = (
+            environment.current_requirements
+            || environment.requested_requirements
+            || []
+        );
+
+        if (dependencies.length) {
+            const heading = document.createElement("small");
+            heading.className = "agent-environment-subheading";
+            const resolvedCount = (
+                environment.resolved_manifest
+                || []
+            ).length;
+
+            heading.textContent = (
+                resolvedCount
+                    ? `Dependencies · ${resolvedCount} resolved packages`
+                    : "Dependencies"
+            );
+
+            const chips = document.createElement("div");
+            chips.className = "agent-environment-chips";
+
+            for (const dependency of dependencies.slice(0, 24)) {
+                const chip = document.createElement("span");
+                chip.textContent = dependency;
+                chips.appendChild(chip);
+            }
+
+            el.environmentDependencies.append(heading, chips);
+        }
+
+        el.environmentBuilds.replaceChildren();
+
+        if (profile === "project" && builds.length) {
+            const heading = document.createElement("small");
+            heading.className = "agent-environment-subheading";
+            heading.textContent = "Build history";
+            el.environmentBuilds.appendChild(heading);
+
+            for (const build of builds.slice(-3).reverse()) {
+                const row = document.createElement("div");
+                row.className = "agent-environment-build-row";
+
+                const top = document.createElement("div");
+                const status = document.createElement("strong");
+                status.textContent = build.cached
+                    ? "Cache hit"
+                    : formatEnvironmentStage(build.status);
+
+                const duration = document.createElement("small");
+                const ms = Number(build.duration_ms || 0);
+                duration.textContent = build.cached
+                    ? "reused locally"
+                    : (
+                        ms >= 1000
+                            ? `${(ms / 1000).toFixed(1)}s`
+                            : `${ms}ms`
+                    );
+
+                top.append(status, duration);
+
+                const tag = document.createElement("small");
+                tag.textContent = build.image_tag || "";
+
+                row.append(top, tag);
+                el.environmentBuilds.appendChild(row);
+            }
+        }
     }
 
     function stateLabel(state) {
@@ -361,16 +649,10 @@
         );
         el.detailMeta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${envLabel} · updated ${formatDate(run.updated_at)}`;
         el.detailGoal.textContent = run.goal || "";
-        el.result.classList.remove("muted", "error-text");
-        if (run.result) {
-            el.result.textContent = run.result;
-        } else if (run.error) {
-            el.result.textContent = run.error;
-            el.result.classList.add("error-text");
-        } else {
-            el.result.textContent = isActiveState(run.state) ? "Agent is working..." : "Agent has not produced a final result yet.";
-            el.result.classList.add("muted");
-        }
+        renderRichResult(
+            run,
+            data.rendered_result_html,
+        );
         const waiting = run.state === "waiting_input" && run.pending_question;
         el.questionSection.hidden = !waiting;
         el.pendingQuestion.textContent = waiting ? run.pending_question : "";
@@ -379,6 +661,11 @@
         renderEvidence(data.evidence || []);
         renderSources(data.sources || [], data.document_sources || []);
         renderArtifacts(data.artifacts || []);
+        renderEnvironment(
+            run,
+            data.project_environment || {},
+            data.environment_builds || [],
+        );
     }
 
     function updateEnvironmentHint() {
@@ -578,6 +865,39 @@
         window.clearTimeout(pollHandle);
         pollHandle = window.setTimeout(poll, anyActive ? 2200 : 6000);
     }
+
+    el.result?.addEventListener(
+        "click",
+        async (event) => {
+            const button = event.target.closest(
+                ".code-copy-button"
+            );
+
+            if (!button) return;
+
+            const code = button
+                .closest(".code-block")
+                ?.querySelector(".code-content");
+
+            if (!code) return;
+
+            const text = code.textContent || "";
+
+            try {
+                await navigator.clipboard.writeText(text);
+                button.textContent = "Copied";
+
+                window.setTimeout(() => {
+                    button.textContent = "Copy";
+                }, 1200);
+            } catch (_) {
+                window.prompt(
+                    "Copy code:",
+                    text,
+                );
+            }
+        },
+    );
 
     el.form.addEventListener("submit", startAgent);
     el.refreshButton.addEventListener("click", async () => {

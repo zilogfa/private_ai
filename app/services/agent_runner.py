@@ -854,8 +854,9 @@ def _forced_final(run):
         "reached. Synthesize the most useful supported answer from the run ledger. Do not "
         "invent missing facts. Clearly distinguish confirmed, likely, unverified, "
         "conflicting, and rejected findings. Cite recorded source keys such as S1 or D1 "
-        "when relevant. Return ONLY JSON with keys: answer (string), evidence (array), "
-        "artifacts (array)."
+        "when relevant. The answer string may use concise Markdown headings, lists, tables, "
+        "and code blocks when those formats make the result easier to understand. "
+        "Return ONLY JSON with keys: answer (string), evidence (array), artifacts (array)."
     )
     user_prompt = (
         "GOAL:\n"
