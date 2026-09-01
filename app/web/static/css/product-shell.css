@@ -1,0 +1,17 @@
+.atlas-product-signature {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.atlas-workspace-zip {
+    margin-top: 8px;
+    width: 100%;
+    text-decoration: none;
+}
+
+.atlas-agent-library-link {
+    margin-left: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13px;
+}

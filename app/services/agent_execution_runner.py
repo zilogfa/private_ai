@@ -343,12 +343,14 @@ def _plan_next_action(run):
         "workspace version.\n"
         "- workspace_list: list current logical workspace files.\n"
         "- workspace_read: read one current workspace file; include filename.\n"
-        "- run_python: execute one current Python workspace file in Docker; include filename.\n"
+        "- run_python: execute one EXISTING .py workspace file in Docker; filename is REQUIRED. "
+        "Never use run_python to create/populate CSV, JSON, Markdown, or other non-Python files; "
+        "use write_file for those.\n"
         "- needs_input: pause only for a genuinely important user decision/fact or when "
         "the goal explicitly asks to involve the user.\n"
         "- final: finish only when useful work is complete or further progress is not "
         "reasonable within the remaining budget.\n\n"
-        "Prefer Python standard-library solutions in v1.10 because arbitrary dependency "
+        "Prefer Python standard-library solutions in v2.0 because arbitrary dependency "
         "installation is intentionally disabled. Return ONLY one JSON object."
     )
 
@@ -373,11 +375,24 @@ def _plan_next_action(run):
 
     last_error = None
     for attempt in range(2):
+        retry_note = ""
+
+        if attempt:
+            retry_note = (
+                "\n\nPrevious action was invalid: "
+                + str(
+                    last_error
+                    or "missing required action data"
+                )
+                + "\nRe-plan from the current workspace and ledger. "
+                + "Do not repeat the invalid action. Return strict JSON only."
+            )
+
         raw, model = base_runner._run_model(
             run,
             system_prompt,
             user_prompt
-            + ("\n\nPrevious reply was invalid. Return strict JSON only." if attempt else ""),
+            + retry_note,
             response_format="json",
         )
         try:
@@ -397,6 +412,79 @@ def _plan_next_action(run):
         data["model"] = model
         data["reason"] = str(data.get("reason") or "").strip()[:1000]
 
+        workspace_names = {
+            str(item.get("filename") or "").strip()
+            for item in list_workspace_files(
+                run["user_id"],
+                run["id"],
+            )
+            if str(item.get("filename") or "").strip()
+        }
+
+        if action == "run_python":
+            requested = str(
+                data.get("filename")
+                or ""
+            ).strip()
+
+            target = (
+                requested
+                or _latest_python_target(
+                    run
+                )
+            )
+
+            if (
+                not target
+                or target not in workspace_names
+                or not target.lower().endswith(".py")
+            ):
+                last_error = base_runner.AgentExecutionError(
+                    "run_python requires the filename of an existing .py workspace file. "
+                    "If the task is creating CSV/JSON/Markdown/data, use write_file instead."
+                )
+                continue
+
+            data["filename"] = target
+
+        elif action == "workspace_read":
+            filename = str(
+                data.get("filename")
+                or ""
+            ).strip()
+
+            if (
+                not filename
+                or filename not in workspace_names
+            ):
+                last_error = base_runner.AgentExecutionError(
+                    "workspace_read requires the filename of an existing workspace file."
+                )
+                continue
+
+            data["filename"] = filename
+
+        elif action == "write_file":
+            filename = str(
+                data.get("filename")
+                or ""
+            ).strip()
+
+            if not filename:
+                last_error = base_runner.AgentExecutionError(
+                    "write_file requires a workspace filename. Choose a clear filename "
+                    "appropriate for the requested artifact."
+                )
+                continue
+
+            if data.get("content") is None:
+                last_error = base_runner.AgentExecutionError(
+                    "write_file requires complete file content."
+                )
+                continue
+
+            data["filename"] = filename
+
         if (
             action == "final"
             and _CODE_GOAL_RE.search(str(run.get("goal") or ""))
@@ -412,9 +500,18 @@ def _plan_next_action(run):
 
         return data
 
-    raise last_error or base_runner.AgentExecutionError(
-        "Sandbox agent controller could not select a valid action."
-    )
+    # A malformed filename/action should never strand a persistent run in
+    # "running". If the controller twice fails validation, close the loop with a
+    # normal finalization step rather than executing an invalid sandbox call.
+    return {
+        "action": "final",
+        "reason": (
+            "The controller could not produce a valid next file/sandbox action "
+            "after re-planning. Finalize the useful work completed so far and "
+            "state any incomplete deliverable clearly."
+        ),
+        "model": "deterministic",
+    }
 
 
 def _execute_workspace_list(run):

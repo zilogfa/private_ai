@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% block title %}Internal users · {{ product.name }}{% endblock %}
+{% block body_class %}onboarding-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
+
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/onboarding.css') }}"
+>
+{% endblock %}
+
+{% block content %}
+<main
+    id="onboardingApp"
+    class="onboarding-page"
+    data-temp-password-present="{{ '1' if created_user else '0' }}"
+>
+    <header class="onboarding-header">
+        <div>
+            <a
+                href="{{ url_for('web.admin') }}"
+                class="onboarding-back"
+            >
+                ← Back to Admin
+            </a>
+
+            <div class="onboarding-title-row">
+                <div class="brand-mark">
+                    {{ product.mark }}
+                </div>
+
+                <div>
+                    <h1>Internal user onboarding</h1>
+                    <p>
+                        Create a local ATLAS account with a one-time temporary password.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="onboarding-signature">
+            {{ product.signature }}
+        </div>
+    </header>
+
+    {% if created_user %}
+    <section class="onboarding-success-card">
+        <div>
+            <strong>Account created</strong>
+            <p>
+                Share this temporary password securely with
+                <strong>{{ created_user.display_name }}</strong>.
+                It is shown only in this response and is not stored as plaintext.
+            </p>
+        </div>
+
+        <div class="temporary-password-box">
+            <code id="temporaryPassword">
+                {{ created_user.temporary_password }}
+            </code>
+
+            <button
+                id="copyTemporaryPasswordButton"
+                class="secondary-button"
+                type="button"
+            >
+                Copy
+            </button>
+        </div>
+
+        <small>
+            Username:
+            <strong>{{ created_user.username }}</strong>
+            · Role:
+            <strong>{{ created_user.role }}</strong>
+            · ATLAS will require a new password immediately after first login.
+        </small>
+    </section>
+    {% endif %}
+
+    {% if create_error %}
+    <div class="onboarding-error">
+        {{ create_error }}
+    </div>
+    {% endif %}
+
+    <section class="onboarding-grid">
+        <section class="onboarding-card">
+            <h2>Create internal user</h2>
+            <p class="muted">
+                For normal internal testing use User. Guest is intentionally more limited.
+            </p>
+
+            <form
+                method="post"
+                action="{{ url_for('onboarding_web.create_onboarding_user') }}"
+                class="onboarding-form"
+            >
+                <input
+                    type="hidden"
+                    name="_csrf_token"
+                    value="{{ csrf_token() }}"
+                >
+
+                <label>
+                    Username
+                    <input
+                        name="username"
+                        type="text"
+                        maxlength="64"
+                        autocomplete="off"
+                        placeholder="ellie"
+                        required
+                    >
+                </label>
+
+                <label>
+                    Display name
+                    <input
+                        name="display_name"
+                        type="text"
+                        maxlength="120"
+                        autocomplete="off"
+                        placeholder="Ellie"
+                    >
+                </label>
+
+                <label>
+                    Role
+                    <select
+                        name="role"
+                    >
+                        <option value="user">
+                            User · normal ATLAS capabilities
+                        </option>
+
+                        <option value="guest">
+                            Guest · limited account
+                        </option>
+                    </select>
+                </label>
+
+                <div class="onboarding-security-note">
+                    <strong>Temporary password flow</strong>
+                    <span>
+                        ATLAS generates the password, stores only its secure hash,
+                        shows the plaintext once, and forces replacement after login.
+                    </span>
+                </div>
+
+                <button
+                    class="primary-button"
+                    type="submit"
+                >
+                    Create user
+                </button>
+            </form>
+        </section>
+
+        <section class="onboarding-card users-card">
+            <div class="onboarding-card-heading">
+                <div>
+                    <h2>Local accounts</h2>
+                    <p class="muted">
+                        Passwords are never displayed here.
+                    </p>
+                </div>
+
+                <span class="user-count">
+                    {{ users|length }} total
+                </span>
+            </div>
+
+            <div class="onboarding-user-list">
+                {% for item in users %}
+                <article class="onboarding-user-row">
+                    <div class="onboarding-avatar">
+                        {{ item.display_name[0]|upper }}
+                    </div>
+
+                    <div class="onboarding-user-main">
+                        <strong>
+                            {{ item.display_name }}
+                        </strong>
+
+                        <small>
+                            {{ item.username }}
+                            · {{ item.role }}
+                        </small>
+                    </div>
+
+                    <div class="onboarding-user-status">
+                        {% if item.must_change_password %}
+                        <span class="status-pill pending">
+                            Password change required
+                        </span>
+                        {% elif item.status != 'active' %}
+                        <span class="status-pill disabled">
+                            {{ item.status }}
+                        </span>
+                        {% elif item.last_login_at %}
+                        <span class="status-pill active">
+                            Active
+                        </span>
+                        {% else %}
+                        <span class="status-pill">
+                            Not signed in yet
+                        </span>
+                        {% endif %}
+
+                        {% if item.last_login_at %}
+                        <small>
+                            Last login {{ item.last_login_at }}
+                        </small>
+                        {% endif %}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+    </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/onboarding.js') }}"
+    defer
+></script>
+{% endblock %}

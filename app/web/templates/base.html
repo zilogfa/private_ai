@@ -14,7 +14,7 @@
         content="{{ csrf_token() }}"
     >
     <title>
-        {% block title %}Private AI{% endblock %}
+        {% block title %}{{ product.name }}{% endblock %}
     </title>
     <script
         src="{{ url_for('static', filename='js/theme.js') }}"
@@ -23,11 +23,19 @@
         rel="stylesheet"
         href="{{ url_for('static', filename='css/app.css') }}"
     >
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/product-shell.css') }}"
+    >
     {% block head %}{% endblock %}
 </head>
 <body
     class="{% block body_class %}{% endblock %}"
     data-theme="{% block theme %}system{% endblock %}"
+    data-product-name="{{ product.name }}"
+    data-product-company="{{ product.company }}"
+    data-product-mark="{{ product.mark }}"
+    data-can-library="{{ '1' if can_library else '0' }}"
 >
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -42,6 +50,11 @@
     {% endwith %}
 
     {% block content %}{% endblock %}
+
+    <script
+        src="{{ url_for('static', filename='js/product-shell.js') }}"
+        defer
+    ></script>
 
     {% block scripts %}{% endblock %}
 </body>

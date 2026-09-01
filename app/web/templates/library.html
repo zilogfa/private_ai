@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+
+{% block title %}Library · {{ product.name }}{% endblock %}
+{% block body_class %}library-body{% endblock %}
+{% block theme %}{{ settings.get('theme', 'system') }}{% endblock %}
+{% block accent_color %}{{ settings.get('extra', {}).get('accent_color', 'default') }}{% endblock %}
+
+{% block head %}
+<link
+    rel="stylesheet"
+    href="{{ url_for('static', filename='css/library.css') }}"
+>
+{% endblock %}
+
+{% block content %}
+<main
+    id="libraryApp"
+    class="library-page"
+>
+    <header class="library-header">
+        <div>
+            <a
+                class="library-back"
+                href="{{ url_for('web.chat') }}"
+            >
+                ← Back to chat
+            </a>
+
+            <div class="library-title-row">
+                <div class="brand-mark">
+                    {{ product.mark }}
+                </div>
+
+                <div>
+                    <h1>{{ product.name }} Library</h1>
+                    <p>
+                        Files, media, links, uploads and agent-generated resources.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="library-brand-signature">
+            {{ product.signature }}
+        </div>
+    </header>
+
+    <section class="library-toolbar">
+        <div class="library-search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input
+                id="librarySearch"
+                type="search"
+                placeholder="Search your Library"
+                autocomplete="off"
+            >
+        </div>
+
+        <div class="library-actions">
+            <label
+                class="primary-button library-upload-button"
+                for="libraryUploadInput"
+            >
+                Upload
+            </label>
+
+            <input
+                id="libraryUploadInput"
+                type="file"
+                multiple
+                hidden
+            >
+
+            <button
+                id="libraryAddLinkButton"
+                class="secondary-button"
+                type="button"
+            >
+                Add link
+            </button>
+        </div>
+    </section>
+
+    <section
+        id="libraryLinkPanel"
+        class="library-link-panel"
+        hidden
+    >
+        <form id="libraryLinkForm">
+            <input
+                id="libraryLinkTitle"
+                type="text"
+                maxlength="500"
+                placeholder="Optional title"
+            >
+
+            <input
+                id="libraryLinkUrl"
+                type="url"
+                placeholder="https://..."
+                required
+            >
+
+            <button
+                class="primary-button"
+                type="submit"
+            >
+                Save link
+            </button>
+
+            <button
+                id="libraryCancelLinkButton"
+                class="secondary-button"
+                type="button"
+            >
+                Cancel
+            </button>
+        </form>
+    </section>
+
+    <section class="library-filter-shell">
+        <div
+            id="libraryKindFilters"
+            class="library-filter-row"
+            aria-label="Library type filters"
+        >
+            <button data-kind="" class="active" type="button">All</button>
+            <button data-kind="image" type="button">Images</button>
+            <button data-kind="document" type="button">Documents</button>
+            <button data-kind="code" type="button">Code</button>
+            <button data-kind="data" type="button">Data</button>
+            <button data-kind="audio" type="button">Audio</button>
+            <button data-kind="video" type="button">Video</button>
+            <button data-kind="link" type="button">Links</button>
+            <button data-kind="archive" type="button">Archives</button>
+        </div>
+
+        <div class="library-secondary-filters">
+            <select
+                id="libraryOriginFilter"
+                aria-label="Filter by origin"
+            >
+                <option value="">All origins</option>
+                <option value="upload">Direct uploads</option>
+                <option value="chat">Chat uploads</option>
+                <option value="generated">Generated</option>
+                <option value="agent">Agent</option>
+                <option value="link">Saved links</option>
+            </select>
+
+            <label class="library-favorite-filter">
+                <input
+                    id="libraryFavoritesOnly"
+                    type="checkbox"
+                >
+                Favorites
+            </label>
+
+            <button
+                id="libraryRefreshButton"
+                class="secondary-button"
+                type="button"
+            >
+                Refresh
+            </button>
+        </div>
+    </section>
+
+    <div
+        id="libraryNotice"
+        class="library-notice"
+        hidden
+        aria-live="polite"
+    ></div>
+
+    <section class="library-summary-row">
+        <div>
+            <strong id="libraryResultCount">0</strong>
+            <span>resources</span>
+        </div>
+
+        <small>
+            Direct uploads are private to your account. Existing chat,
+            generated and agent files are indexed without copying them.
+        </small>
+    </section>
+
+    <section
+        id="libraryGrid"
+        class="library-grid"
+    >
+        <div class="library-empty">
+            Loading Library…
+        </div>
+    </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script
+    src="{{ url_for('static', filename='js/library.js') }}"
+    defer
+></script>
+{% endblock %}
