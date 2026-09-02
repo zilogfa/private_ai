@@ -383,6 +383,24 @@ def write_workspace_file(user_id, run_id, filename, content):
         _, path = get_agent_artifact_path(user_id, existing["id"])
         if not path:
             raise AgentSandboxError("Existing workspace file is missing on disk.")
+
+        # Preserve the previous working copy before the Agent overwrites it.
+        # Import locally to avoid coupling the low-level sandbox module during
+        # startup and keep legacy workspaces compatible.
+        try:
+            from app.services.agent_file_versions import (
+                ensure_current_artifact_version,
+            )
+
+            ensure_current_artifact_version(
+                user_id,
+                existing["id"],
+            )
+        except Exception as error:
+            raise AgentSandboxError(
+                f"Could not snapshot the previous file revision: {error}"
+            ) from error
+
         path.write_bytes(encoded)
         conn = get_connection()
         cur = conn.cursor()
@@ -396,11 +414,29 @@ def write_workspace_file(user_id, run_id, filename, content):
         )
         conn.commit()
         conn.close()
+
+        try:
+            from app.services.agent_file_versions import (
+                record_current_artifact_version,
+            )
+
+            version = record_current_artifact_version(
+                user_id,
+                existing["id"],
+                source="agent_write",
+                note="Workspace file updated by Agent/tool execution.",
+            )
+        except Exception as error:
+            raise AgentSandboxError(
+                f"File was updated but version history could not be recorded: {error}"
+            ) from error
+
         return {
             "filename": safe_name,
             "size_bytes": len(encoded),
             "updated": True,
             "artifact_id": existing["id"],
+            "version_number": version.get("version_number"),
         }
 
     workspace = _workspace(user_id, run_id)
@@ -434,11 +470,29 @@ def write_workspace_file(user_id, run_id, filename, content):
     )
     conn.commit()
     conn.close()
+
+    try:
+        from app.services.agent_file_versions import (
+            record_current_artifact_version,
+        )
+
+        version = record_current_artifact_version(
+            user_id,
+            artifact_id,
+            source="agent_write",
+            note="Initial workspace file revision.",
+        )
+    except Exception as error:
+        raise AgentSandboxError(
+            f"File was created but version history could not be recorded: {error}"
+        ) from error
+
     return {
         "filename": safe_name,
         "size_bytes": len(encoded),
         "updated": False,
         "artifact_id": artifact_id,
+        "version_number": version.get("version_number"),
     }
 
 

@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/agents.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-revisions.css') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-environments.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/agent-file-history.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -225,7 +226,128 @@
             </aside>
         </div>
     </section>
+
 </main>
+
+<div
+    id="agentFileModal"
+    class="agent-file-modal"
+    hidden
+    aria-hidden="true"
+>
+    <button
+        id="agentFileModalBackdrop"
+        class="agent-file-modal-backdrop"
+        type="button"
+        aria-label="Close file preview"
+    ></button>
+
+    <section
+        class="agent-file-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agentFileTitle"
+    >
+        <header class="agent-file-panel-header">
+            <div>
+                <small>Workspace file</small>
+                <h2 id="agentFileTitle">File preview</h2>
+                <div id="agentFileMeta" class="agent-file-meta"></div>
+            </div>
+
+            <button
+                id="agentFileClose"
+                type="button"
+                class="secondary-button compact-button"
+            >
+                Close
+            </button>
+        </header>
+
+        <div class="agent-file-panel-layout">
+            <main class="agent-file-preview-column">
+                <div class="agent-file-toolbar">
+                    <div class="agent-file-toolbar-left">
+                        <button
+                            id="agentFilePreviewButton"
+                            type="button"
+                            class="secondary-button compact-button"
+                        >
+                            Preview
+                        </button>
+
+                        <button
+                            id="agentFileDiffButton"
+                            type="button"
+                            class="secondary-button compact-button"
+                            hidden
+                        >
+                            Compare to current
+                        </button>
+                    </div>
+
+                    <div class="agent-file-toolbar-right">
+                        <a
+                            id="agentFileDownload"
+                            class="secondary-button compact-button"
+                            href="#"
+                        >
+                            Download
+                        </a>
+
+                        <button
+                            id="agentFileRestoreButton"
+                            type="button"
+                            class="danger-button compact-button"
+                            hidden
+                        >
+                            Restore this version
+                        </button>
+                    </div>
+                </div>
+
+                <div
+                    id="agentFileSecurityNote"
+                    class="agent-file-security-note"
+                    hidden
+                ></div>
+
+                <div
+                    id="agentFileRenderedPreview"
+                    class="agent-file-rendered-preview rendered-markdown"
+                    hidden
+                ></div>
+
+                <pre
+                    id="agentFileSourcePreview"
+                    class="agent-file-source-preview"
+                ></pre>
+
+                <pre
+                    id="agentFileDiffPreview"
+                    class="agent-file-diff-preview"
+                    hidden
+                ></pre>
+            </main>
+
+            <aside class="agent-file-history-column">
+                <div class="agent-file-history-heading">
+                    <div>
+                        <h3>Version history</h3>
+                        <small>
+                            Immutable snapshots of this workspace file.
+                        </small>
+                    </div>
+                </div>
+
+                <div
+                    id="agentFileVersionList"
+                    class="agent-file-version-list"
+                ></div>
+            </aside>
+        </div>
+    </section>
+</div>
 {% endblock %}
 
 {% block scripts %}

@@ -23,6 +23,7 @@ from app.services.notifications import initialize_notification_storage
 from app.services.agents import initialize_agent_storage, recover_stale_agent_runs
 from app.services.agent_sandbox import initialize_agent_sandbox_storage
 from app.services.agent_environment import initialize_agent_environment_storage
+from app.services.agent_file_versions import initialize_agent_file_version_storage
 from app.services.agent_budget_upgrade import apply_agent_budget_upgrade
 from app.services.library import (
     LIBRARY_MAX_UPLOAD_BYTES,
@@ -80,6 +81,7 @@ def create_app():
     initialize_agent_storage()
     initialize_agent_sandbox_storage()
     initialize_agent_environment_storage()
+    initialize_agent_file_version_storage()
     initialize_library_storage()
     initialize_user_onboarding_storage()
     initialize_agent_identity_storage()

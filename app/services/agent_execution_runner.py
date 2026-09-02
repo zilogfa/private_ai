@@ -36,6 +36,9 @@ from app.services.agent_environment import (
     project_environment_allowed,
     setup_project_environment,
 )
+from app.services.agent_file_versions import (
+    list_workspace_mutations_after,
+)
 from app.services.agent_project_planner import (
     active_plan_blocks_on_environment,
     active_plan_matches_current_failure,
@@ -270,11 +273,23 @@ def _deterministic_unverified_answer(
     if state.get(
         "writes_after"
     ):
+        external = bool(
+            state.get(
+                "external_mutations"
+            )
+        )
+
+        change_label = (
+            "restored or changed outside the previous sandbox execution"
+            if external
+            else "modified after its latest sandbox execution"
+        )
+
         return (
-            "NOT VERIFIED — The workspace was modified after its latest sandbox "
-            f"execution ({filename}), so the current revision still requires a "
-            "re-test. The run reached its current step budget before verification. "
-            "Use Continue / Revise to continue the same workspace."
+            f"NOT VERIFIED — The workspace was {change_label} "
+            f"({filename}), so the current revision requires a fresh re-test. "
+            "An earlier successful test cannot verify the changed workspace. "
+            "Use Continue / Revise to continue the same workspace and re-verify it."
         )
 
     status = str(
@@ -430,6 +445,7 @@ def _latest_execution_state(run):
             "execution": None,
             "step_index": 0,
             "writes_after": [],
+            "external_mutations": [],
             "verified": False,
         }
 
@@ -463,6 +479,78 @@ def _latest_execution_state(run):
         )
     ]
 
+    # Workspace truth is broader than the Agent step ledger.
+    #
+    # User rollback/version restore (and future manual edits, QA handoffs or
+    # multi-Agent merges) can mutate the current workspace without creating a
+    # write_file/project_repair step. Those changes MUST invalidate an older
+    # successful sandbox execution.
+    external_mutations = list_workspace_mutations_after(
+        run["user_id"],
+        run["id"],
+        created_after=
+            latest.get(
+                "created_at"
+            ),
+        limit=100,
+    )
+
+    for mutation in external_mutations:
+        writes_after.append(
+            {
+                "id":
+                    mutation.get(
+                        "id"
+                    ),
+                "step_index":
+                    None,
+                "phase":
+                    "workspace",
+                "action":
+                    mutation.get(
+                        "mutation_type"
+                    )
+                    or "external_change",
+                "tool_name":
+                    "agent.workspace.external_mutation",
+                "status":
+                    "completed",
+                "reason":
+                    mutation.get(
+                        "note"
+                    ),
+                "input":
+                    {
+                        "artifact_id":
+                            mutation.get(
+                                "artifact_id"
+                            ),
+                        "filename":
+                            mutation.get(
+                                "filename"
+                            ),
+                        "version_id":
+                            mutation.get(
+                                "version_id"
+                            ),
+                    },
+                "output":
+                    mutation.get(
+                        "note"
+                    ),
+                "started_at":
+                    mutation.get(
+                        "created_at"
+                    ),
+                "finished_at":
+                    mutation.get(
+                        "created_at"
+                    ),
+                "external_workspace_mutation":
+                    True,
+            }
+        )
+
     verified = (
         str(latest.get("status") or "") == "success"
         and int(latest.get("exit_code") or 0) == 0
@@ -473,6 +561,7 @@ def _latest_execution_state(run):
         "execution": latest,
         "step_index": step_index,
         "writes_after": writes_after,
+        "external_mutations": external_mutations,
         "verified": verified,
     }
 
@@ -519,6 +608,29 @@ def _sandbox_verification_summary(run):
         )
 
     if state["writes_after"]:
+        if state.get("external_mutations"):
+            mutations = state[
+                "external_mutations"
+            ]
+
+            labels = [
+                (
+                    f"{item.get('mutation_type') or 'external_change'}"
+                    + (
+                        f":{item.get('filename')}"
+                        if item.get("filename")
+                        else ""
+                    )
+                )
+                for item in mutations[-5:]
+            ]
+
+            return (
+                "NOT VERIFIED: the current workspace changed outside the previous "
+                f"sandbox execution of {latest.get('filename')} "
+                f"({', '.join(labels)}). A fresh re-test is mandatory."
+            )
+
         return (
             "NOT VERIFIED: workspace file(s) were changed after the latest "
             f"sandbox execution of {latest.get('filename')}. A re-test is required."

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from flask import Blueprint, jsonify, request, send_file
 
 from app.auth import get_current_user_id, permission_required
@@ -39,6 +41,15 @@ from app.services.agent_environment import (
 )
 from app.services.rag import has_indexed_documents
 from app.services.markdown import render_markdown
+from app.services.agent_file_versions import (
+    AgentFileVersionError,
+    diff_version_to_current,
+    get_version_file_path,
+    list_artifact_versions,
+    preview_artifact,
+    restore_artifact_version,
+    version_counts_for_run,
+)
 
 agent_api_bp = Blueprint("agent_api", __name__, url_prefix="/api/agents")
 
@@ -108,6 +119,29 @@ def _run_detail(user_id, run_id):
         or ""
     )
 
+    artifacts = list_agent_artifacts(
+        user_id,
+        run_id,
+    )
+
+    version_counts = version_counts_for_run(
+        user_id,
+        run_id,
+    )
+
+    decorated_artifacts = [
+        {
+            **artifact,
+            "version_count": int(
+                version_counts.get(
+                    artifact.get("id"),
+                    0,
+                )
+            ),
+        }
+        for artifact in artifacts
+    ]
+
     return {
         "run": _decorate_run(user_id, run),
         "rendered_result_html": (
@@ -121,7 +155,7 @@ def _run_detail(user_id, run_id):
         "sources": list_agent_sources(user_id, run_id),
         "document_sources": list_agent_document_sources(user_id, run_id),
         "evidence": list_agent_evidence(user_id, run_id),
-        "artifacts": list_agent_artifacts(user_id, run_id),
+        "artifacts": decorated_artifacts,
         "inputs": list_agent_inputs(user_id, run_id),
         "sandbox_executions": list_agent_sandbox_executions(
             user_id, run_id, limit=30
@@ -283,6 +317,166 @@ def delete_run(run_id):
     if not deleted:
         return _error("Agent run was not found.", 404)
     return jsonify({"deleted": True, "run_id": run_id})
+
+
+
+@agent_api_bp.get("/artifacts/<artifact_id>/preview")
+@permission_required("agent.use")
+def agent_artifact_preview(artifact_id):
+    user_id = get_current_user_id()
+
+    try:
+        preview = preview_artifact(
+            user_id,
+            artifact_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    return jsonify(preview)
+
+
+@agent_api_bp.get("/artifacts/<artifact_id>/versions")
+@permission_required("agent.use")
+def agent_artifact_versions(artifact_id):
+    user_id = get_current_user_id()
+
+    try:
+        versions = list_artifact_versions(
+            user_id,
+            artifact_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    return jsonify({
+        "versions":
+            versions
+    })
+
+
+@agent_api_bp.get(
+    "/artifacts/<artifact_id>/versions/<version_id>/preview"
+)
+@permission_required("agent.use")
+def agent_artifact_version_preview(
+    artifact_id,
+    version_id,
+):
+    user_id = get_current_user_id()
+
+    try:
+        preview = preview_artifact(
+            user_id,
+            artifact_id,
+            version_id=
+                version_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    return jsonify(preview)
+
+
+@agent_api_bp.get(
+    "/artifacts/<artifact_id>/versions/<version_id>/diff"
+)
+@permission_required("agent.use")
+def agent_artifact_version_diff(
+    artifact_id,
+    version_id,
+):
+    user_id = get_current_user_id()
+
+    try:
+        result = diff_version_to_current(
+            user_id,
+            artifact_id,
+            version_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    return jsonify(result)
+
+
+@agent_api_bp.get(
+    "/artifacts/<artifact_id>/versions/<version_id>/content"
+)
+@permission_required("agent.use")
+def agent_artifact_version_content(
+    artifact_id,
+    version_id,
+):
+    user_id = get_current_user_id()
+
+    try:
+        artifact, version, path = get_version_file_path(
+            user_id,
+            artifact_id,
+            version_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    if not artifact or not version or not path:
+        return _error(
+            "Agent file version was not found.",
+            404,
+        )
+
+    filename = (
+        f"{Path(artifact.get('filename') or 'file.txt').stem}"
+        f"_v{version['version_number']}"
+        f"{Path(artifact.get('filename') or 'file.txt').suffix}"
+    )
+
+    response = send_file(
+        path,
+        mimetype=(
+            artifact.get("mime_type")
+            or "application/octet-stream"
+        ),
+        download_name=
+            filename,
+        as_attachment=
+            True,
+        conditional=
+            True,
+    )
+
+    response.headers[
+        "Cache-Control"
+    ] = "private, no-store"
+
+    return response
+
+
+@agent_api_bp.post(
+    "/artifacts/<artifact_id>/versions/<version_id>/restore"
+)
+@permission_required("agent.use")
+def agent_artifact_version_restore(
+    artifact_id,
+    version_id,
+):
+    user_id = get_current_user_id()
+
+    try:
+        result = restore_artifact_version(
+            user_id,
+            artifact_id,
+            version_id,
+        )
+    except AgentFileVersionError as error:
+        return _error(error, 400)
+
+    result["run"] = _decorate_run(
+        user_id,
+        result.get("run"),
+    )
+
+    return jsonify(result)
 
 
 @agent_api_bp.get("/artifacts/<artifact_id>/content")

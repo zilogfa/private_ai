@@ -46,6 +46,20 @@
         pendingQuestion: document.getElementById("agentPendingQuestion"),
         inputForm: document.getElementById("agentInputForm"),
         inputText: document.getElementById("agentInputText"),
+        fileModal: document.getElementById("agentFileModal"),
+        fileModalBackdrop: document.getElementById("agentFileModalBackdrop"),
+        fileClose: document.getElementById("agentFileClose"),
+        fileTitle: document.getElementById("agentFileTitle"),
+        fileMeta: document.getElementById("agentFileMeta"),
+        filePreviewButton: document.getElementById("agentFilePreviewButton"),
+        fileDiffButton: document.getElementById("agentFileDiffButton"),
+        fileDownload: document.getElementById("agentFileDownload"),
+        fileRestoreButton: document.getElementById("agentFileRestoreButton"),
+        fileSecurityNote: document.getElementById("agentFileSecurityNote"),
+        fileRenderedPreview: document.getElementById("agentFileRenderedPreview"),
+        fileSourcePreview: document.getElementById("agentFileSourcePreview"),
+        fileDiffPreview: document.getElementById("agentFileDiffPreview"),
+        fileVersionList: document.getElementById("agentFileVersionList"),
     };
 
     let selectedRunId = null;
@@ -53,6 +67,9 @@
     let requestBusy = false;
     let sandboxReady = false;
     let projectEnvironmentAllowed = false;
+    let activeFileArtifact = null;
+    let activeFileVersion = null;
+    let activeFileVersions = [];
 
     function showNotice(message, kind = "info") {
         if (!el.notice) return;
@@ -594,6 +611,286 @@
         }
     }
 
+
+    function fileVersionLabel(version) {
+        if (!version) return "Current";
+        return `v${version.version_number || "?"}`;
+    }
+
+    function closeFileModal() {
+        if (!el.fileModal) return;
+
+        el.fileModal.hidden = true;
+        el.fileModal.setAttribute("aria-hidden", "true");
+        document.body.classList.remove("agent-file-modal-open");
+
+        activeFileArtifact = null;
+        activeFileVersion = null;
+        activeFileVersions = [];
+    }
+
+    function setFilePreviewMode(mode) {
+        const diff = mode === "diff";
+
+        el.fileDiffPreview.hidden = !diff;
+
+        if (!diff) {
+            const hasRendered = Boolean(
+                el.fileRenderedPreview.innerHTML.trim()
+            );
+
+            el.fileRenderedPreview.hidden = !hasRendered;
+            el.fileSourcePreview.hidden = hasRendered;
+        } else {
+            el.fileRenderedPreview.hidden = true;
+            el.fileSourcePreview.hidden = true;
+        }
+    }
+
+    function renderFileVersionList() {
+        el.fileVersionList.replaceChildren();
+
+        if (!activeFileVersions.length) {
+            const empty = document.createElement("div");
+            empty.className = "agent-empty compact";
+            empty.textContent = "No version history yet.";
+            el.fileVersionList.appendChild(empty);
+            return;
+        }
+
+        const latestId = activeFileVersions[0]?.id;
+
+        for (const version of activeFileVersions) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "agent-file-version-row";
+
+            if (activeFileVersion?.id === version.id) {
+                button.classList.add("selected");
+            }
+
+            const top = document.createElement("div");
+            const label = document.createElement("strong");
+            label.textContent = fileVersionLabel(version);
+
+            const badge = document.createElement("span");
+            badge.textContent = (
+                version.id === latestId
+                    ? "Current"
+                    : (version.source || "snapshot")
+            );
+
+            top.append(label, badge);
+
+            const detail = document.createElement("small");
+            detail.textContent = formatDate(version.created_at);
+
+            const note = document.createElement("small");
+            note.textContent = (
+                version.note
+                || `${Math.max(
+                    1,
+                    Math.round((version.size_bytes || 0) / 1024),
+                )} KB`
+            );
+
+            button.append(top, detail, note);
+
+            button.addEventListener("click", () => {
+                loadFileVersion(version.id);
+            });
+
+            el.fileVersionList.appendChild(button);
+        }
+    }
+
+    function renderFilePreview(data) {
+        const artifact = data.artifact || activeFileArtifact || {};
+
+        activeFileArtifact = artifact;
+        activeFileVersion = (
+            data.selected_version
+            || data.current_version
+            || null
+        );
+
+        el.fileTitle.textContent = artifact.filename || "File preview";
+
+        const versionText = activeFileVersion
+            ? fileVersionLabel(activeFileVersion)
+            : "Current";
+
+        el.fileMeta.textContent = [
+            versionText,
+            `${Math.max(
+                1,
+                Math.round((artifact.size_bytes || 0) / 1024),
+            )} KB`,
+            data.is_current ? "current workspace" : "historical snapshot",
+        ].join(" · ");
+
+        el.fileSecurityNote.hidden = !data.security_note;
+        el.fileSecurityNote.textContent = data.security_note || "";
+
+        el.fileRenderedPreview.innerHTML = "";
+        el.fileSourcePreview.textContent = data.text || "";
+
+        if (
+            data.preview_mode === "markdown"
+            && typeof data.rendered_html === "string"
+            && data.rendered_html.trim()
+        ) {
+            el.fileRenderedPreview.innerHTML = data.rendered_html;
+            enhanceRenderedResult(el.fileRenderedPreview);
+        }
+
+        el.fileDiffPreview.textContent = "";
+        setFilePreviewMode("preview");
+
+        const historical = Boolean(
+            !data.is_current
+            && activeFileVersion
+        );
+
+        el.fileDiffButton.hidden = !historical;
+        el.fileRestoreButton.hidden = !historical;
+
+        if (historical) {
+            el.fileDownload.href = (
+                `/api/agents/artifacts/${encodeURIComponent(artifact.id)}`
+                + `/versions/${encodeURIComponent(activeFileVersion.id)}/content`
+            );
+        } else {
+            el.fileDownload.href = (
+                `/api/agents/artifacts/${encodeURIComponent(artifact.id)}/content`
+            );
+        }
+
+        renderFileVersionList();
+    }
+
+    async function loadFileVersion(versionId) {
+        if (!activeFileArtifact) return;
+
+        try {
+            const data = await api(
+                `/api/agents/artifacts/${encodeURIComponent(activeFileArtifact.id)}`
+                + `/versions/${encodeURIComponent(versionId)}/preview`
+            );
+
+            renderFilePreview(data);
+        } catch (error) {
+            showNotice(error.message, "error");
+        }
+    }
+
+    async function openFilePreview(item) {
+        if (!item?.id || !el.fileModal) return;
+
+        activeFileArtifact = item;
+        activeFileVersion = null;
+        activeFileVersions = [];
+
+        el.fileTitle.textContent = item.filename || "File preview";
+        el.fileMeta.textContent = "Loading...";
+        el.fileVersionList.replaceChildren();
+        el.fileSourcePreview.textContent = "Loading preview...";
+        el.fileRenderedPreview.innerHTML = "";
+        el.fileDiffPreview.textContent = "";
+
+        el.fileModal.hidden = false;
+        el.fileModal.setAttribute("aria-hidden", "false");
+        document.body.classList.add("agent-file-modal-open");
+
+        try {
+            const [preview, versionsData] = await Promise.all([
+                api(
+                    `/api/agents/artifacts/${encodeURIComponent(item.id)}/preview`
+                ),
+                api(
+                    `/api/agents/artifacts/${encodeURIComponent(item.id)}/versions`
+                ),
+            ]);
+
+            activeFileVersions = versionsData.versions || [];
+            renderFilePreview(preview);
+        } catch (error) {
+            el.fileSourcePreview.textContent = error.message;
+            el.fileMeta.textContent = "Preview unavailable";
+        }
+    }
+
+    async function compareActiveFileVersion() {
+        if (!activeFileArtifact || !activeFileVersion) return;
+
+        try {
+            const result = await api(
+                `/api/agents/artifacts/${encodeURIComponent(activeFileArtifact.id)}`
+                + `/versions/${encodeURIComponent(activeFileVersion.id)}/diff`
+            );
+
+            el.fileDiffPreview.textContent = (
+                result.changed
+                    ? result.diff
+                    : "No differences from the current workspace file."
+            );
+
+            setFilePreviewMode("diff");
+        } catch (error) {
+            showNotice(error.message, "error");
+        }
+    }
+
+    async function restoreActiveFileVersion() {
+        if (!activeFileArtifact || !activeFileVersion) return;
+
+        const label = fileVersionLabel(activeFileVersion);
+
+        if (!window.confirm(
+            `Restore ${activeFileArtifact.filename} to ${label}? `
+            + "The run will be marked for re-verification."
+        )) {
+            return;
+        }
+
+        el.fileRestoreButton.disabled = true;
+        el.fileRestoreButton.textContent = "Restoring...";
+
+        try {
+            const result = await api(
+                `/api/agents/artifacts/${encodeURIComponent(activeFileArtifact.id)}`
+                + `/versions/${encodeURIComponent(activeFileVersion.id)}/restore`,
+                {
+                    method: "POST",
+                },
+            );
+
+            if (result.no_change) {
+                showNotice(
+                    "That version is already the current workspace file.",
+                    "info",
+                );
+            } else {
+                showNotice(
+                    "File restored. The Agent run now requires re-verification.",
+                    "success",
+                );
+            }
+
+            closeFileModal();
+
+            if (selectedRunId) {
+                await loadRunDetail(selectedRunId);
+                await loadRuns();
+            }
+        } catch (error) {
+            showNotice(error.message, "error");
+        } finally {
+            el.fileRestoreButton.disabled = false;
+            el.fileRestoreButton.textContent = "Restore this version";
+        }
+    }
+
     function visibleArtifacts(items) {
         const latestWorkspace = new Map();
         const other = [];
@@ -610,6 +907,7 @@
     function renderArtifacts(items) {
         el.artifactList.replaceChildren();
         const visible = visibleArtifacts(items);
+
         if (!visible.length) {
             const empty = document.createElement("div");
             empty.className = "agent-empty compact";
@@ -617,17 +915,60 @@
             el.artifactList.appendChild(empty);
             return;
         }
+
         for (const item of visible) {
-            const link = document.createElement("a");
-            link.className = "agent-artifact-item";
-            link.href = `/api/agents/artifacts/${encodeURIComponent(item.id)}/content`;
+            const row = document.createElement("div");
+            row.className = "agent-artifact-item agent-artifact-file-row";
+
+            const info = document.createElement("div");
+            info.className = "agent-artifact-file-info";
+
             const name = document.createElement("strong");
             name.textContent = item.filename || "artifact";
+
             const meta = document.createElement("small");
-            const kb = Math.max(1, Math.round((item.size_bytes || 0) / 1024));
-            meta.textContent = `${item.kind || "artifact"} · ${kb} KB`;
-            link.append(name, meta);
-            el.artifactList.appendChild(link);
+            const kb = Math.max(
+                1,
+                Math.round((item.size_bytes || 0) / 1024),
+            );
+
+            const versions = Number(item.version_count || 0);
+
+            meta.textContent = [
+                item.kind || "artifact",
+                `${kb} KB`,
+                (
+                    item.kind === "workspace_file" && versions
+                        ? `${versions} version${versions === 1 ? "" : "s"}`
+                        : ""
+                ),
+            ].filter(Boolean).join(" · ");
+
+            info.append(name, meta);
+
+            const actions = document.createElement("div");
+            actions.className = "agent-artifact-file-actions";
+
+            if (item.kind === "workspace_file") {
+                actions.appendChild(
+                    makeButton(
+                        "Preview",
+                        "secondary-button compact-button",
+                        () => openFilePreview(item),
+                    )
+                );
+            }
+
+            const download = document.createElement("a");
+            download.className = "secondary-button compact-button";
+            download.href = (
+                `/api/agents/artifacts/${encodeURIComponent(item.id)}/content`
+            );
+            download.textContent = "Download";
+
+            actions.appendChild(download);
+            row.append(info, actions);
+            el.artifactList.appendChild(row);
         }
     }
 
@@ -910,6 +1251,45 @@
     el.inputForm.addEventListener("submit", submitAgentInput);
     el.sandboxProfile?.addEventListener("change", updateEnvironmentHint);
     el.allowCode?.addEventListener("change", updateEnvironmentHint);
+
+    el.fileClose?.addEventListener(
+        "click",
+        closeFileModal,
+    );
+
+    el.fileModalBackdrop?.addEventListener(
+        "click",
+        closeFileModal,
+    );
+
+    el.filePreviewButton?.addEventListener(
+        "click",
+        () => setFilePreviewMode("preview"),
+    );
+
+    el.fileDiffButton?.addEventListener(
+        "click",
+        compareActiveFileVersion,
+    );
+
+    el.fileRestoreButton?.addEventListener(
+        "click",
+        restoreActiveFileVersion,
+    );
+
+    document.addEventListener(
+        "keydown",
+        (event) => {
+            if (
+                event.key === "Escape"
+                && el.fileModal
+                && !el.fileModal.hidden
+            ) {
+                closeFileModal();
+            }
+        },
+    );
+
     updateEnvironmentHint();
     poll();
 })();
