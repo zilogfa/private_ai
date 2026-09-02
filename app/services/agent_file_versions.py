@@ -56,6 +56,13 @@ _TEXT_EXTENSIONS = {
     ".html",
     ".css",
     ".js",
+    ".mjs",
+    ".cjs",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
     ".py",
 }
 
@@ -1060,6 +1067,11 @@ def _decode_preview(
                 in {
                     ".html",
                     ".js",
+                    ".mjs",
+                    ".cjs",
+                    ".jsx",
+                    ".ts",
+                    ".tsx",
                 }
                 else None
             ),

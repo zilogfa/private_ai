@@ -159,7 +159,7 @@ def initialize_agent_environment_storage():
             AGENT_ENVIRONMENT_PERMISSION,
             (
                 "Allow opted-in Agent project environments to download sanitized "
-                "Python dependencies during an isolated Docker build phase."
+                "runtime dependencies during an isolated Docker build phase."
             ),
             timestamp,
             timestamp,

@@ -25,8 +25,12 @@ _TOOL_REGISTRY = {
     "agent.workspace.list": ToolSpec("agent.workspace.list", "agent.use", "List logical files in one agent run's private workspace."),
     "agent.workspace.read": ToolSpec("agent.workspace.read", "agent.use", "Read one text/source file from one agent run's private workspace."),
     "agent.sandbox.python": ToolSpec("agent.sandbox.python", "agent.code.execute", "Execute one Python workspace file inside a resource-limited Docker sandbox. Normal execution has network disabled, immutable durable source, and a writable disposable runtime."),
-    "agent.environment.plan": ToolSpec("agent.environment.plan", "agent.environment.setup", "Create or update a sanitized requirements.txt manifest for a missing Python dependency."),
-    "agent.environment.setup": ToolSpec("agent.environment.setup", "agent.environment.setup", "Build or reuse an isolated content-addressed Python dependency image. Package names/specifiers are sent to the package index during setup only; normal execution remains network-disabled.", True, True),
+    "agent.sandbox.node": ToolSpec("agent.sandbox.node", "agent.code.execute", "Execute one JavaScript entry file with Node.js inside the same resource-limited, network-disabled Docker sandbox."),
+    "agent.sandbox.npm": ToolSpec("agent.sandbox.npm", "agent.code.execute", "Run one existing package.json npm script inside a resource-limited, network-disabled Docker sandbox."),
+    "agent.environment.plan": ToolSpec("agent.environment.plan", "agent.environment.setup", "Create or update a sanitized dependency manifest for the active runtime: requirements.txt for Python or package.json dependencies for Node.js."),
+    "agent.environment.setup": ToolSpec("agent.environment.setup", "agent.environment.setup", "Build or reuse an isolated content-addressed Python/pip or Node/npm dependency image. Sanitized package requirements are sent to the matching registry during setup only; normal execution remains network-disabled.", True, True),
+    "agent.project.plan": ToolSpec("agent.project.plan", "agent.code.execute", "Build a deterministic project-contract/debug recovery plan for supported runtimes (currently strongest for Python)."),
+    "agent.project.repair": ToolSpec("agent.project.repair", "agent.code.execute", "Apply one planner-guided workspace repair, followed by mandatory re-verification."),
     "agent.input.request": ToolSpec("agent.input.request", "agent.use", "Pause an agent run at a real decision point and resume the same run after user input."),
 }
 

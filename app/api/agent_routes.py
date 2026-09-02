@@ -39,6 +39,19 @@ from app.services.agent_environment import (
     list_environment_builds,
     set_agent_run_environment_profile,
 )
+from app.services.agent_node_environment import (
+    list_node_environment_builds,
+    node_environment_status_for_run,
+)
+from app.services.agent_runtime import (
+    RUNTIME_AUTO,
+    RUNTIME_NODE,
+    RUNTIME_PYTHON,
+    VALID_RUNTIMES,
+    get_agent_run_runtime,
+    runtime_catalog_status,
+    set_agent_run_runtime,
+)
 from app.services.rag import has_indexed_documents
 from app.services.markdown import render_markdown
 from app.services.agent_file_versions import (
@@ -88,6 +101,21 @@ def _validate_capabilities(user_id, payload):
     if profile not in {ENV_PROFILE_STRICT, ENV_PROFILE_PROJECT}:
         raise AgentStoreError("Unknown sandbox environment profile.")
 
+    runtime = str(
+        payload.get("sandbox_runtime")
+        or RUNTIME_AUTO
+    ).strip().lower()
+    runtime = {
+        "js": RUNTIME_NODE,
+        "javascript": RUNTIME_NODE,
+        "nodejs": RUNTIME_NODE,
+        "node.js": RUNTIME_NODE,
+        "py": RUNTIME_PYTHON,
+    }.get(runtime, runtime)
+
+    if runtime not in VALID_RUNTIMES:
+        raise AgentStoreError("Unknown sandbox runtime.")
+
     if (
         bool(payload.get("allow_code"))
         and profile == ENV_PROFILE_PROJECT
@@ -101,11 +129,51 @@ def _validate_capabilities(user_id, payload):
 def _decorate_run(user_id, run):
     if not run:
         return None
+
     result = dict(run)
-    result["allow_code"] = agent_run_allows_code(user_id, run["id"])
-    environment = get_agent_run_environment(user_id, run["id"])
-    result["sandbox_profile"] = environment.get("profile") or ENV_PROFILE_STRICT
-    result["environment_status"] = environment.get("status") or "base"
+    result["allow_code"] = agent_run_allows_code(
+        user_id,
+        run["id"],
+    )
+
+    environment = get_agent_run_environment(
+        user_id,
+        run["id"],
+    )
+    runtime = get_agent_run_runtime(
+        user_id,
+        run["id"],
+    )
+
+    result["sandbox_profile"] = (
+        environment.get("profile")
+        or ENV_PROFILE_STRICT
+    )
+    result["sandbox_runtime"] = runtime.get(
+        "selected_runtime"
+    ) or RUNTIME_AUTO
+    result["effective_runtime"] = runtime.get(
+        "effective_runtime"
+    ) or RUNTIME_PYTHON
+    result["runtime_label"] = runtime.get(
+        "label"
+    ) or "Python"
+
+    if result["effective_runtime"] == RUNTIME_NODE:
+        node_environment = node_environment_status_for_run(
+            user_id,
+            run["id"],
+        )
+        result["environment_status"] = (
+            node_environment.get("status")
+            or "base"
+        )
+    else:
+        result["environment_status"] = (
+            environment.get("status")
+            or "base"
+        )
+
     return result
 
 
@@ -142,8 +210,34 @@ def _run_detail(user_id, run_id):
         for artifact in artifacts
     ]
 
+    decorated_run = _decorate_run(
+        user_id,
+        run,
+    )
+
+    if decorated_run.get("effective_runtime") == RUNTIME_NODE:
+        project_environment = node_environment_status_for_run(
+            user_id,
+            run_id,
+        )
+        environment_builds = list_node_environment_builds(
+            user_id,
+            run_id,
+            limit=20,
+        )
+    else:
+        project_environment = environment_status_for_run(
+            user_id,
+            run_id,
+        )
+        environment_builds = list_environment_builds(
+            user_id,
+            run_id,
+            limit=20,
+        )
+
     return {
-        "run": _decorate_run(user_id, run),
+        "run": decorated_run,
         "rendered_result_html": (
             render_markdown(
                 result_text
@@ -160,8 +254,8 @@ def _run_detail(user_id, run_id):
         "sandbox_executions": list_agent_sandbox_executions(
             user_id, run_id, limit=30
         ),
-        "project_environment": environment_status_for_run(user_id, run_id),
-        "environment_builds": list_environment_builds(user_id, run_id, limit=20),
+        "project_environment": project_environment,
+        "environment_builds": environment_builds,
     }
 
 
@@ -184,17 +278,18 @@ def agent_status():
                 ),
             },
             "sandbox": sandbox_status(),
+            "sandbox_runtimes": runtime_catalog_status(),
             "sandbox_profiles": [
                 {
                     "id": ENV_PROFILE_STRICT,
                     "label": "Strict",
-                    "description": "Network-off execution using base/preinstalled Python packages.",
+                    "description": "Network-off execution using the selected runtime's base/preinstalled packages.",
                 },
                 {
                     "id": ENV_PROFILE_PROJECT,
                     "label": "Project",
                     "description": (
-                        "Sanitized dependencies may be downloaded during an isolated setup build; "
+                        "Sanitized pip/npm dependencies may be downloaded during an isolated setup build; "
                         "normal execution remains network-off."
                     ),
                 },
@@ -233,6 +328,15 @@ def create_run():
             user_id,
             run["id"],
             bool(payload.get("allow_code")),
+        )
+        set_agent_run_runtime(
+            user_id,
+            run["id"],
+            (
+                payload.get("sandbox_runtime")
+                if bool(payload.get("allow_code"))
+                else RUNTIME_AUTO
+            ),
         )
         set_agent_run_environment_profile(
             user_id,

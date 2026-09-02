@@ -1,3 +1,4 @@
+import json
 import mimetypes
 import os
 import shutil
@@ -33,6 +34,12 @@ SANDBOX_CPUS = os.environ.get(
 ).strip()
 SANDBOX_RUNTIME_TMPFS = os.environ.get(
     "PRIVATE_AI_AGENT_SANDBOX_RUNTIME_TMPFS", "128m"
+).strip()
+SANDBOX_NODE_TIMEOUT_SECONDS = int(
+    os.environ.get("PRIVATE_AI_AGENT_NODE_TIMEOUT_SECONDS", "60")
+)
+SANDBOX_NODE_RUNTIME_TMPFS = os.environ.get(
+    "PRIVATE_AI_AGENT_NODE_RUNTIME_TMPFS", "256m"
 ).strip()
 SANDBOX_MAX_WORKSPACE_FILES = int(
     os.environ.get("PRIVATE_AI_AGENT_SANDBOX_MAX_FILES", "20")
@@ -70,7 +77,7 @@ def initialize_agent_sandbox_storage():
         """,
         (
             AGENT_CODE_PERMISSION,
-            "Allow opted-in agent runs to execute Python inside the local Docker sandbox.",
+            "Allow opted-in agent runs to execute supported code runtimes inside the local Docker sandbox.",
             ts,
             ts,
         ),
@@ -124,6 +131,29 @@ def initialize_agent_sandbox_storage():
         )
         """
     )
+    # v2.3: execution history is runtime-aware while remaining backward
+    # compatible with existing Python rows.
+    cur.execute("PRAGMA table_info(agent_sandbox_executions)")
+    execution_columns = {
+        str(row[1])
+        for row in cur.fetchall()
+    }
+    if "runtime" not in execution_columns:
+        cur.execute(
+            "ALTER TABLE agent_sandbox_executions "
+            "ADD COLUMN runtime TEXT NOT NULL DEFAULT 'python'"
+        )
+    if "execution_action" not in execution_columns:
+        cur.execute(
+            "ALTER TABLE agent_sandbox_executions "
+            "ADD COLUMN execution_action TEXT NOT NULL DEFAULT 'run_python'"
+        )
+    if "command_text" not in execution_columns:
+        cur.execute(
+            "ALTER TABLE agent_sandbox_executions "
+            "ADD COLUMN command_text TEXT"
+        )
+
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_agent_sandbox_exec_run
@@ -216,8 +246,21 @@ def sandbox_runtime_profile(user_id=None, run_id=None):
         except Exception:
             dependency_installation = False
 
+    effective_runtime = "python"
+    runtime_image = SANDBOX_IMAGE
+    try:
+        if user_id is not None and run_id is not None:
+            from app.services.agent_runtime import get_agent_run_runtime
+            runtime_info = get_agent_run_runtime(user_id, run_id)
+            effective_runtime = runtime_info.get("effective_runtime") or "python"
+            runtime_image = runtime_info.get("base_image") or SANDBOX_IMAGE
+    except Exception:
+        pass
+
     return {
         "profile": profile_name,
+        "runtime": effective_runtime,
+        "runtime_image": runtime_image,
         "source_mount": "/workspace",
         "source_read_only": True,
         "runtime_workdir": "/runtime",
@@ -231,6 +274,7 @@ def sandbox_runtime_profile(user_id=None, run_id=None):
         "setup_network": bool(dependency_installation),
         "runs_as_root": False,
         "python_image": SANDBOX_IMAGE,
+        "base_image": runtime_image,
         "dependency_installation": dependency_installation,
         "dependency_status": dependency_status,
         "dependency_note": (
@@ -288,7 +332,7 @@ def sandbox_status(force=False):
                 "image_ready": image_ready,
                 "image": SANDBOX_IMAGE,
                 "message": (
-                    "Docker Python sandbox is ready. Executions use a writable disposable runtime copy; network access is disabled."
+                    "Docker sandbox engine and Python base image are ready. Supported runtimes use a writable disposable runtime copy; execution network access is disabled."
                     if image_ready
                     else f"Sandbox image is not installed. Run: docker pull {SANDBOX_IMAGE}"
                 ),
@@ -532,6 +576,9 @@ def _record_execution(
     stdout_text,
     stderr_text,
     image=None,
+    runtime="python",
+    execution_action="run_python",
+    command_text=None,
 ):
     conn = get_connection()
     cur = conn.cursor()
@@ -539,8 +586,9 @@ def _record_execution(
         """
         INSERT INTO agent_sandbox_executions (
             id, run_id, user_id, step_id, filename, image, status,
-            exit_code, duration_ms, stdout_text, stderr_text, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            exit_code, duration_ms, stdout_text, stderr_text, created_at,
+            runtime, execution_action, command_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             execution_id,
@@ -555,11 +603,13 @@ def _record_execution(
             str(stdout_text or "")[:SANDBOX_MAX_STDOUT_CHARS],
             str(stderr_text or "")[:SANDBOX_MAX_STDERR_CHARS],
             utc_iso(),
+            str(runtime or "python")[:40],
+            str(execution_action or "run_python")[:80],
+            (str(command_text)[:1000] if command_text else None),
         ),
     )
     conn.commit()
     conn.close()
-
 
 def list_agent_sandbox_executions(user_id, run_id, limit=20):
     initialize_agent_sandbox_storage()
@@ -568,7 +618,8 @@ def list_agent_sandbox_executions(user_id, run_id, limit=20):
     cur.execute(
         """
         SELECT id, step_id, filename, image, status, exit_code,
-               duration_ms, stdout_text, stderr_text, created_at
+               duration_ms, stdout_text, stderr_text, created_at,
+               runtime, execution_action, command_text
         FROM agent_sandbox_executions
         WHERE run_id = ? AND user_id = ?
         ORDER BY created_at ASC LIMIT ?
@@ -589,10 +640,12 @@ def list_agent_sandbox_executions(user_id, run_id, limit=20):
             "stdout": row[7],
             "stderr": row[8],
             "created_at": row[9],
+            "runtime": row[10] or "python",
+            "execution_action": row[11] or "run_python",
+            "command": row[12],
         }
         for row in rows
     ]
-
 
 def _remove_container(name):
     try:
@@ -607,47 +660,44 @@ def _remove_container(name):
         pass
 
 
-def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=None):
-    initialize_agent_sandbox_storage()
-    if not agent_run_allows_code(user_id, run_id):
-        raise AgentSandboxError("This agent run was not allowed to execute code.")
+def _docker_execution_environment():
+    return {
+        key: value
+        for key, value in {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME"),
+            "DOCKER_HOST": os.environ.get("DOCKER_HOST"),
+            "DOCKER_CONTEXT": os.environ.get("DOCKER_CONTEXT"),
+        }.items()
+        if value
+    }
 
-    status = sandbox_status(force=True)
-    if not status.get("ready"):
-        raise AgentSandboxUnavailable(status.get("message") or "Docker sandbox unavailable.")
 
-    safe_name, suffix = _safe_name(filename)
-    if suffix != ".py":
-        raise AgentSandboxError("ATLAS sandbox execution currently supports Python entry files only.")
-    if safe_name not in _latest_files(user_id, run_id):
-        raise AgentSandboxError(f"Python workspace file was not found: {safe_name}")
-
-    from app.services.agent_environment import resolve_execution_image
-
-    execution_image = resolve_execution_image(user_id, run_id)
-
+def _run_runtime_container(
+    user_id,
+    run_id,
+    *,
+    step_id,
+    filename,
+    runtime,
+    execution_action,
+    execution_image,
+    runtime_script,
+    runtime_args,
+    timeout_seconds,
+    runtime_tmpfs,
+    cancel_check=None,
+    command_text=None,
+):
     execution_id, bundle = _bundle(user_id, run_id)
-    if not (bundle / safe_name).is_file():
+    if filename and not (bundle / filename).is_file():
         shutil.rmtree(bundle, ignore_errors=True)
-        raise AgentSandboxError(f"Python workspace file was not materialized: {safe_name}")
+        raise AgentSandboxError(
+            f"Workspace file was not materialized: {filename}"
+        )
 
-    container_name = f"private-ai-agent-{str(run_id)[:8]}-{execution_id[:8]}"
-    # Security model:
-    # - /workspace is the immutable host-backed source snapshot.
-    # - /runtime is a disposable tmpfs copy owned by the unprivileged container user.
-    #   Programs may create JSON, SQLite DBs, caches, generated files, Flask runtime
-    #   files, etc. without ever mutating the durable host workspace.
-    # - /tmp is independently writable for tempfile and test fixtures.
-    runtime_script = (
-        "set -eu; "
-        "cp -R /workspace/. /runtime/; "
-        # /runtime itself is the Docker-created tmpfs root and is owned by root.
-        # The unprivileged execution user must not chmod that mountpoint.
-        # Files/directories copied INTO it are owned by the execution user and
-        # can safely be made writable.
-        "find /runtime -mindepth 1 -exec chmod u+rwX {} +; "
-        "cd /runtime; "
-        "exec python -B \"$1\""
+    container_name = (
+        f"private-ai-agent-{str(run_id)[:8]}-{execution_id[:8]}"
     )
 
     command = [
@@ -660,16 +710,21 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
         "--security-opt", "no-new-privileges:true",
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
-        "--tmpfs", f"/runtime:rw,exec,nosuid,nodev,size={SANDBOX_RUNTIME_TMPFS},mode=1777",
+        "--tmpfs", f"/runtime:rw,exec,nosuid,nodev,size={runtime_tmpfs},mode=1777",
         "--env", "HOME=/tmp",
         "--env", "TMPDIR=/tmp",
         "--env", "PYTHONDONTWRITEBYTECODE=1",
         "--env", "PYTHONUNBUFFERED=1",
+        "--env", "NPM_CONFIG_UPDATE_NOTIFIER=false",
+        "--env", "NPM_CONFIG_FUND=false",
+        "--env", "NPM_CONFIG_AUDIT=false",
         "--mount", f"type=bind,source={bundle},target=/workspace,readonly",
         "--workdir", "/runtime",
         "--user", "65534:65534",
         execution_image,
-        "sh", "-lc", runtime_script, "atlas-runtime", safe_name,
+        "sh", "-lc", runtime_script,
+        "atlas-runtime",
+        *[str(value) for value in runtime_args],
     ]
 
     started = time.monotonic()
@@ -685,18 +740,9 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={
-                key: value
-                for key, value in {
-                    "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-                    "HOME": os.environ.get("HOME"),
-                    "DOCKER_HOST": os.environ.get("DOCKER_HOST"),
-                    "DOCKER_CONTEXT": os.environ.get("DOCKER_CONTEXT"),
-                }.items()
-                if value
-            },
+            env=_docker_execution_environment(),
         )
-        deadline = started + max(2, SANDBOX_TIMEOUT_SECONDS)
+        deadline = started + max(2, int(timeout_seconds))
 
         while process.poll() is None:
             if cancel_check:
@@ -709,6 +755,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
                     except OSError:
                         pass
                     raise
+
             if time.monotonic() >= deadline:
                 _remove_container(container_name)
                 try:
@@ -717,6 +764,7 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
                     pass
                 exec_status = "timeout"
                 break
+
             time.sleep(0.20)
 
         try:
@@ -740,47 +788,253 @@ def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=Non
                 run_id,
                 step_id,
                 execution_id,
-                safe_name,
+                filename or execution_action,
                 exec_status,
                 exit_code,
                 duration_ms,
                 stdout_text,
                 stderr_text,
                 image=execution_image,
+                runtime=runtime,
+                execution_action=execution_action,
+                command_text=command_text,
             )
         finally:
             shutil.rmtree(bundle, ignore_errors=True)
 
     return {
         "id": execution_id,
-        "filename": safe_name,
+        "filename": filename or execution_action,
         "status": exec_status,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "stdout": stdout_text[:SANDBOX_MAX_STDOUT_CHARS],
         "stderr": stderr_text[:SANDBOX_MAX_STDERR_CHARS],
         "image": execution_image,
+        "runtime": runtime,
+        "execution_action": execution_action,
+        "command": command_text,
     }
+
+
+def _runtime_copy_script(executable):
+    return (
+        "set -eu; "
+        "cp -R /workspace/. /runtime/; "
+        "find /runtime -mindepth 1 -exec chmod u+rwX {} +; "
+        "cd /runtime; "
+        + executable
+    )
+
+
+def run_python_sandbox(user_id, run_id, filename, step_id=None, cancel_check=None):
+    initialize_agent_sandbox_storage()
+    if not agent_run_allows_code(user_id, run_id):
+        raise AgentSandboxError("This agent run was not allowed to execute code.")
+
+    status = sandbox_status(force=True)
+    if not status.get("docker_daemon"):
+        raise AgentSandboxUnavailable(
+            status.get("message") or "Docker sandbox unavailable."
+        )
+
+    safe_name, suffix = _safe_name(filename)
+    if suffix != ".py":
+        raise AgentSandboxError("run_python requires an existing .py workspace file.")
+    if safe_name not in _latest_files(user_id, run_id):
+        raise AgentSandboxError(f"Python workspace file was not found: {safe_name}")
+
+    from app.services.agent_environment import resolve_execution_image
+    execution_image = resolve_execution_image(user_id, run_id)
+
+    runtime_script = _runtime_copy_script(
+        'exec python -B "$1"'
+    )
+
+    return _run_runtime_container(
+        user_id,
+        run_id,
+        step_id=step_id,
+        filename=safe_name,
+        runtime="python",
+        execution_action="run_python",
+        execution_image=execution_image,
+        runtime_script=runtime_script,
+        runtime_args=[safe_name],
+        timeout_seconds=SANDBOX_TIMEOUT_SECONDS,
+        runtime_tmpfs=SANDBOX_RUNTIME_TMPFS,
+        cancel_check=cancel_check,
+        command_text=f"python -B {safe_name}",
+    )
+
+
+def _node_runtime_script(executable):
+    # Node dependencies live immutably in /opt/atlas/node_modules inside the
+    # dependency image. The writable runtime gets only a symlink, so dependencies
+    # do not consume the tmpfs or become mutable during project execution.
+    return _runtime_copy_script(
+        'if [ -d /opt/atlas/node_modules ] && [ ! -e /runtime/node_modules ]; '
+        'then ln -s /opt/atlas/node_modules /runtime/node_modules; fi; '
+        + executable
+    )
+
+
+def run_node_sandbox(user_id, run_id, filename, step_id=None, cancel_check=None):
+    initialize_agent_sandbox_storage()
+    if not agent_run_allows_code(user_id, run_id):
+        raise AgentSandboxError("This agent run was not allowed to execute code.")
+
+    status = sandbox_status(force=True)
+    if not status.get("docker_daemon"):
+        raise AgentSandboxUnavailable(
+            status.get("message") or "Docker sandbox unavailable."
+        )
+
+    safe_name, suffix = _safe_name(filename)
+    if suffix not in {".js", ".mjs", ".cjs"}:
+        raise AgentSandboxError(
+            "run_node currently executes .js, .mjs, or .cjs entry files. "
+            "JSX/TypeScript may be built through an npm script but are not direct entry files yet."
+        )
+    if safe_name not in _latest_files(user_id, run_id):
+        raise AgentSandboxError(f"Node workspace file was not found: {safe_name}")
+
+    from app.services.agent_node_environment import resolve_node_execution_image
+    execution_image = resolve_node_execution_image(user_id, run_id)
+
+    runtime_script = _node_runtime_script(
+        'exec node "$1"'
+    )
+
+    return _run_runtime_container(
+        user_id,
+        run_id,
+        step_id=step_id,
+        filename=safe_name,
+        runtime="node",
+        execution_action="run_node",
+        execution_image=execution_image,
+        runtime_script=runtime_script,
+        runtime_args=[safe_name],
+        timeout_seconds=SANDBOX_NODE_TIMEOUT_SECONDS,
+        runtime_tmpfs=SANDBOX_NODE_RUNTIME_TMPFS,
+        cancel_check=cancel_check,
+        command_text=f"node {safe_name}",
+    )
+
+
+def _package_scripts(user_id, run_id):
+    names = {
+        str(item.get("filename") or "").lower(): item.get("filename")
+        for item in list_workspace_files(user_id, run_id)
+    }
+    actual = names.get("package.json")
+    if not actual:
+        raise AgentSandboxError("run_npm requires package.json in the workspace.")
+
+    try:
+        data = json.loads(
+            read_workspace_file(user_id, run_id, actual, max_chars=20000)
+        )
+    except json.JSONDecodeError as error:
+        raise AgentSandboxError(f"package.json is invalid JSON: {error}") from error
+
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    if not isinstance(scripts, dict):
+        return {}
+    return {
+        str(name): str(command)
+        for name, command in scripts.items()
+        if str(name).strip() and isinstance(command, str)
+    }
+
+
+def list_npm_scripts(user_id, run_id):
+    return sorted(_package_scripts(user_id, run_id), key=str.lower)
+
+
+def run_npm_script_sandbox(user_id, run_id, script, step_id=None, cancel_check=None):
+    initialize_agent_sandbox_storage()
+    if not agent_run_allows_code(user_id, run_id):
+        raise AgentSandboxError("This agent run was not allowed to execute code.")
+
+    script_name = str(script or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,80}", script_name):
+        raise AgentSandboxError("run_npm requires a valid package.json script name.")
+
+    scripts = _package_scripts(user_id, run_id)
+    if script_name not in scripts:
+        available = ", ".join(sorted(scripts)) or "none"
+        raise AgentSandboxError(
+            f"npm script was not found: {script_name}. Available scripts: {available}"
+        )
+
+    status = sandbox_status(force=True)
+    if not status.get("docker_daemon"):
+        raise AgentSandboxUnavailable(
+            status.get("message") or "Docker sandbox unavailable."
+        )
+
+    from app.services.agent_node_environment import resolve_node_execution_image
+    execution_image = resolve_node_execution_image(user_id, run_id)
+
+    runtime_script = _node_runtime_script(
+        'exec npm run --silent "$1"'
+    )
+
+    return _run_runtime_container(
+        user_id,
+        run_id,
+        step_id=step_id,
+        filename="package.json",
+        runtime="node",
+        execution_action="run_npm",
+        execution_image=execution_image,
+        runtime_script=runtime_script,
+        runtime_args=[script_name],
+        timeout_seconds=SANDBOX_NODE_TIMEOUT_SECONDS,
+        runtime_tmpfs=SANDBOX_NODE_RUNTIME_TMPFS,
+        cancel_check=cancel_check,
+        command_text=f"npm run {script_name}",
+    )
 
 
 def format_execution_observation(execution):
     status = str(execution.get("status") or "unknown").upper()
+    runtime = str(execution.get("runtime") or "python").lower()
+    action = str(execution.get("execution_action") or "run_python")
+
+    if action == "run_npm":
+        heading = f"Sandbox npm execution: {execution.get('command') or execution.get('filename')}"
+    elif runtime == "node":
+        heading = f"Sandbox Node.js execution: {execution.get('filename')}"
+    else:
+        heading = f"Sandbox Python execution: {execution.get('filename')}"
+
     lines = [
-        f"Sandbox Python execution: {execution.get('filename')}",
+        heading,
         (
             f"Status: {status}"
             + (f" · exit code {execution.get('exit_code')}" if execution.get("exit_code") is not None else "")
             + (f" · {execution.get('duration_ms')} ms" if execution.get("duration_ms") is not None else "")
         ),
-        "Security: Docker container, execution network disabled, durable source mounted read-only; execution runs from a writable disposable runtime copy.",
+        (
+            "Security: Docker container, execution network disabled, durable source "
+            "mounted read-only; execution runs from a writable disposable runtime copy."
+        ),
+        f"Runtime: {'Node.js' if runtime == 'node' else 'Python'}",
         f"Environment image: {execution.get('image')}",
         "\nSTDOUT:\n" + (str(execution.get("stdout") or "").strip() or "[empty]"),
     ]
+
     stderr_text = str(execution.get("stderr") or "").strip()
     if stderr_text:
         lines.append("\nSTDERR:\n" + stderr_text)
+
     if status in {"FAILED", "TIMEOUT"}:
         lines.append(
-            "\nThe program did not pass execution. Inspect the output, revise the workspace file(s), and re-run when useful."
+            "\nThe program/test did not pass execution. Inspect the output, revise "
+            "the workspace file(s), and re-run when useful."
         )
+
     return "\n".join(lines)

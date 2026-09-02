@@ -17,6 +17,7 @@
         allowRag: document.getElementById("agentAllowRag"),
         allowMemory: document.getElementById("agentAllowMemory"),
         allowCode: document.getElementById("agentAllowCode"),
+        sandboxRuntime: document.getElementById("agentSandboxRuntime"),
         sandboxProfile: document.getElementById("agentSandboxProfile"),
         environmentHint: document.getElementById("agentEnvironmentHint"),
         sandboxHint: document.getElementById("agentSandboxHint"),
@@ -67,6 +68,7 @@
     let requestBusy = false;
     let sandboxReady = false;
     let projectEnvironmentAllowed = false;
+    let runtimeStatuses = {};
     let activeFileArtifact = null;
     let activeFileVersion = null;
     let activeFileVersions = [];
@@ -232,6 +234,13 @@
         builds = builds || [];
 
         const profile = environment.profile || run.sandbox_profile || "strict";
+        const runtime = (
+            environment.runtime
+            || run.effective_runtime
+            || run.sandbox_runtime
+            || "python"
+        );
+        const runtimeLabel = runtime === "node" ? "Node.js" : "Python";
         const activity = environment.activity || {};
         const activeActivity = ["running"].includes(activity.status);
 
@@ -262,8 +271,8 @@
         const title = document.createElement("strong");
         title.textContent = (
             profile === "project"
-                ? "Project · dependency-enabled"
-                : "Strict · base Python"
+                ? `Project · ${runtimeLabel} dependencies`
+                : `Strict · ${runtimeLabel}`
         );
 
         const detail = document.createElement("small");
@@ -278,8 +287,8 @@
                     environment.message
                     || (
                         profile === "project"
-                            ? "Project environment status is available."
-                            : "Strict environment uses the base Python image."
+                            ? `${runtimeLabel} project environment status is available.`
+                            : `Strict environment uses the base ${runtimeLabel} image.`
                     )
                 )
         );
@@ -452,10 +461,15 @@
             const title = document.createElement("strong");
             title.textContent = run.title || "Agent run";
             const meta = document.createElement("small");
+            const runtimeLabel = (
+                run.effective_runtime === "node"
+                    ? "Node.js"
+                    : (run.allow_code ? "Python" : "")
+            );
             const envLabel = (
-                run.allow_code && run.sandbox_profile === "project"
-                    ? " · project env"
-                    : (run.allow_code ? " · strict sandbox" : "")
+                run.allow_code
+                    ? ` · ${runtimeLabel} ${run.sandbox_profile === "project" ? "project" : "strict"}`
+                    : ""
             );
             meta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${envLabel}`;
             titleWrap.append(title, meta);
@@ -983,10 +997,15 @@
         el.detailTitle.textContent = run.title || "Agent run";
         el.detailState.textContent = stateLabel(run.state);
         el.detailState.className = `agent-state-pill state-${run.state || "unknown"}`;
+        const runtimeLabel = (
+            run.effective_runtime === "node"
+                ? "Node.js"
+                : (run.allow_code ? "Python" : "")
+        );
         const envLabel = (
-            run.allow_code && run.sandbox_profile === "project"
-                ? " · Docker Project environment"
-                : (run.allow_code ? " · Docker Strict sandbox" : "")
+            run.allow_code
+                ? ` · Docker ${runtimeLabel} ${run.sandbox_profile === "project" ? "Project" : "Strict"}`
+                : ""
         );
         el.detailMeta.textContent = `${run.current_step || 0}/${run.max_steps || 0} steps · ${run.model_mode || "auto"}${envLabel} · updated ${formatDate(run.updated_at)}`;
         el.detailGoal.textContent = run.goal || "";
@@ -1009,19 +1028,44 @@
         );
     }
 
+    function selectedRuntimeStatus() {
+        const selected = el.sandboxRuntime?.value || "auto";
+        return runtimeStatuses[selected] || null;
+    }
+
     function updateEnvironmentHint() {
         if (!el.environmentHint || !el.sandboxProfile) return;
 
         const project = el.sandboxProfile.value === "project";
+        const runtime = el.sandboxRuntime?.value || "auto";
+        const runtimeName = (
+            runtime === "node"
+                ? "Node.js"
+                : (runtime === "python" ? "Python" : "Auto runtime")
+        );
+        const registry = runtime === "node" ? "npm" : (runtime === "python" ? "PyPI" : "the matching package registry");
+
         el.environmentHint.textContent = project
             ? (
-                "Project: ATLAS may download sanitized Python dependencies during an "
-                + "isolated setup build. Project code still executes with network OFF."
+                `${runtimeName} · Project: ATLAS may download sanitized dependencies `
+                + `from ${registry} during an isolated setup build. Project code still `
+                + "executes with network OFF."
             )
             : (
-                "Strict: no dependency downloads. Uses only the base image/preinstalled "
-                + "Python packages; execution network is OFF."
+                `${runtimeName} · Strict: no dependency downloads. Uses only the selected `
+                + "base image/preinstalled packages; execution network is OFF."
             );
+
+        const status = selectedRuntimeStatus();
+        if (
+            el.allowCode?.checked
+            && !project
+            && status
+            && status.id !== "auto"
+            && !status.image_ready
+        ) {
+            el.environmentHint.textContent += ` ${status.pull_command || status.message || "Runtime image is missing."}`;
+        }
     }
 
     async function loadStatus() {
@@ -1030,7 +1074,15 @@
             const engine = data.engine || {};
             const sandbox = data.sandbox || {};
             const active = engine.active_threads || 0;
-            sandboxReady = Boolean(sandbox.ready);
+
+            runtimeStatuses = {};
+            for (const item of (data.sandbox_runtimes || [])) {
+                runtimeStatuses[item.id] = item;
+            }
+
+            // Docker engine readiness is the common requirement. Individual
+            // Python/Node base-image readiness is runtime-specific.
+            sandboxReady = Boolean(sandbox.docker_daemon);
             projectEnvironmentAllowed = Boolean(
                 data.capabilities?.project_environment
             );
@@ -1046,21 +1098,45 @@
                     el.sandboxProfile.value = "strict";
                 }
                 el.sandboxProfile.disabled = !canCode || !sandboxReady;
-                updateEnvironmentHint();
             }
 
-            if (el.sandboxHint) {
-                el.sandboxHint.textContent = sandbox.message || (sandboxReady ? "Docker Python sandbox is ready." : "Docker sandbox is unavailable.");
+            if (el.sandboxRuntime) {
+                el.sandboxRuntime.disabled = !canCode || !sandboxReady;
+
+                for (const option of Array.from(el.sandboxRuntime.options)) {
+                    const status = runtimeStatuses[option.value];
+                    if (!status || option.value === "auto") continue;
+                    option.title = status.message || "";
+                }
             }
+
+            updateEnvironmentHint();
+
+            if (el.sandboxHint) {
+                const selected = selectedRuntimeStatus();
+                const runtimeDetail = (
+                    selected && selected.id !== "auto"
+                        ? selected.message
+                        : "Auto detects Python or Node.js from the goal and workspace."
+                );
+                el.sandboxHint.textContent = sandboxReady
+                    ? `Docker sandbox engine is ready. ${runtimeDetail || ""}`
+                    : (sandbox.message || "Docker sandbox is unavailable.");
+            }
+
             if (el.allowCode) {
                 el.allowCode.disabled = !canCode || !sandboxReady;
                 if (!sandboxReady) el.allowCode.checked = false;
                 el.allowCode.title = sandbox.message || "";
             }
-            el.engineStatus.textContent = active ? `${active} agent active` : (sandboxReady ? "Workspace ready · sandbox ready" : "Workspace ready");
+
+            el.engineStatus.textContent = active
+                ? `${active} agent active`
+                : (sandboxReady ? "Workspace ready · sandbox ready" : "Workspace ready");
             el.engineStatus.dataset.active = active ? "1" : "0";
         } catch (_) {
             sandboxReady = false;
+            runtimeStatuses = {};
             el.engineStatus.textContent = "Workspace status unavailable";
         }
     }
@@ -1105,8 +1181,28 @@
             return;
         }
         if (el.allowCode?.checked && !sandboxReady) {
-            showNotice("The Docker Python sandbox is not ready yet.", "error");
+            showNotice("The Docker sandbox engine is not ready yet.", "error");
             return;
+        }
+
+        if (
+            el.allowCode?.checked
+            && (el.sandboxProfile?.value || "strict") === "strict"
+        ) {
+            const status = selectedRuntimeStatus();
+            if (
+                status
+                && status.id !== "auto"
+                && !status.image_ready
+            ) {
+                showNotice(
+                    status.pull_command
+                        ? `Strict ${status.label} runtime needs its base image first: ${status.pull_command}`
+                        : (status.message || "Selected runtime image is not ready."),
+                    "error",
+                );
+                return;
+            }
         }
         requestBusy = true;
         el.startButton.disabled = true;
@@ -1124,6 +1220,11 @@
                     allow_rag: el.allowRag.checked,
                     allow_memory: el.allowMemory.checked,
                     allow_code: Boolean(el.allowCode?.checked),
+                    sandbox_runtime: (
+                        el.allowCode?.checked
+                            ? (el.sandboxRuntime?.value || "auto")
+                            : "auto"
+                    ),
                     sandbox_profile: (
                         el.allowCode?.checked
                             ? (el.sandboxProfile?.value || "strict")
@@ -1134,6 +1235,7 @@
             el.form.reset();
             el.maxSteps.value = "6";
             el.model.value = "auto";
+            if (el.sandboxRuntime) el.sandboxRuntime.value = "auto";
             if (el.sandboxProfile) el.sandboxProfile.value = "strict";
             updateEnvironmentHint();
             selectedRunId = data.run.id;
@@ -1249,6 +1351,10 @@
         ]);
     });
     el.inputForm.addEventListener("submit", submitAgentInput);
+    el.sandboxRuntime?.addEventListener("change", () => {
+        updateEnvironmentHint();
+        loadStatus();
+    });
     el.sandboxProfile?.addEventListener("change", updateEnvironmentHint);
     el.allowCode?.addEventListener("change", updateEnvironmentHint);
 

@@ -47,6 +47,13 @@ ALLOWED_ARTIFACT_EXTENSIONS = {
     ".html": "text/html",
     ".css": "text/css",
     ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".cjs": "text/javascript",
+    ".jsx": "text/jsx",
+    ".ts": "text/typescript",
+    ".tsx": "text/tsx",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
     ".py": "text/x-python",
 }
 

@@ -45,7 +45,7 @@
                     <h2>Start an agent run</h2>
                     <p>
                         Give ATLAS a goal. The agent can research, create files,
-                        and when explicitly allowed, test Python inside its sandbox.
+                        and when explicitly allowed, execute and test supported runtimes inside its sandbox.
                     </p>
                 </div>
             </div>
@@ -73,7 +73,7 @@
                         id="agentGoal"
                         rows="6"
                         maxlength="8000"
-                        placeholder="Example: Build a small Python calculator with separate logic and test files. Test it in the sandbox, fix any failures, re-test, and save the working files."
+                        placeholder="Example: Build a small app with separate source and test files. Test it in the sandbox, fix failures, re-test, and save the working files."
                         required
                     ></textarea>
                 </label>
@@ -104,11 +104,20 @@
                         </label>
                         <label class="agent-check-row">
                             <input id="agentAllowCode" type="checkbox" {% if not can_code %}disabled{% endif %}>
-                            <span>Allow sandboxed Python execution</span>
+                            <span>Allow sandboxed code execution</span>
                         </label>
 
                         <label class="agent-environment-profile-row">
-                            <span>Python sandbox environment</span>
+                            <span>Sandbox runtime</span>
+                            <select id="agentSandboxRuntime" {% if not can_code %}disabled{% endif %}>
+                                <option value="auto" selected>Auto · detect from project</option>
+                                <option value="python">Python</option>
+                                <option value="node">Node.js</option>
+                            </select>
+                        </label>
+
+                        <label class="agent-environment-profile-row">
+                            <span>Sandbox environment</span>
                             <select id="agentSandboxProfile" {% if not can_code %}disabled{% endif %}>
                                 <option value="strict" selected>Strict · safest default</option>
                                 <option value="project">Project · dependency-enabled</option>
@@ -116,20 +125,19 @@
                         </label>
 
                         <small id="agentEnvironmentHint" class="privacy-note">
-                            Strict: no dependency downloads. Normal execution network is OFF.
+                            Auto runtime detects Python or Node.js. Strict mode never downloads dependencies; normal execution network is OFF.
                         </small>
                         <small id="agentSandboxHint" class="privacy-note">Checking Docker sandbox...</small>
                     </div>
                 </div>
 
                 <div class="agent-foundation-note">
-                    <strong>v2.2.1 execution boundary</strong>
+                    <strong>v2.3 multi-runtime execution boundary</strong>
                     <span>
-                        Code execution is opt-in per run. Strict mode never downloads dependencies.
-                        Project mode may contact the Python package index only during a separate,
-                        sanitized dependency-build phase; normal project execution returns to network OFF.
-                        Durable source remains read-only, runtime files are disposable, and the container
-                        has no Docker socket, dropped Linux capabilities, and resource/time limits.
+                        Code execution is opt-in per run. ATLAS can select Python or Node.js. Strict mode never downloads dependencies.
+                        Project mode may contact only the matching package registry (PyPI or npm) during a separate sanitized setup phase;
+                        normal project execution returns to network OFF. Durable source remains read-only, runtime files are disposable,
+                        and containers have no Docker socket, dropped Linux capabilities, and resource/time limits.
                     </span>
                 </div>
 

@@ -1,6 +1,8 @@
+import hashlib
 import re
 import time
 
+from app.config import DEEP_MODEL
 from app.database import user_has_permission
 from app.services import agent_runner as base_runner
 from app.services.agents import (
@@ -21,8 +23,11 @@ from app.services.agent_sandbox import (
     agent_run_allows_code,
     format_execution_observation,
     list_agent_sandbox_executions,
+    list_npm_scripts,
     list_workspace_files,
     read_workspace_file,
+    run_node_sandbox,
+    run_npm_script_sandbox,
     run_python_sandbox,
     write_workspace_file,
 )
@@ -35,6 +40,20 @@ from app.services.agent_environment import (
     format_environment_observation,
     project_environment_allowed,
     setup_project_environment,
+)
+from app.services.agent_node_environment import (
+    add_missing_node_dependency_to_manifest,
+    format_node_environment_observation,
+    node_environment_needs_setup,
+    node_environment_status_for_run,
+    node_manifest_needs_update,
+    setup_node_project_environment,
+)
+from app.services.agent_runtime import (
+    RUNTIME_NODE,
+    RUNTIME_PYTHON,
+    effective_runtime,
+    get_agent_run_runtime,
 )
 from app.services.agent_file_versions import (
     list_workspace_mutations_after,
@@ -57,8 +76,9 @@ from app.services.agent_project_planner import (
 )
 
 _CODE_GOAL_RE = re.compile(
-    r"\b(?:code|coding|python|script|program|app|application|algorithm|function|"
-    r"class|calculator|test|tests|unit test|debug|fix|rewrite|refactor|implement|build)\b",
+    r"\b(?:code|coding|python|javascript|node|node.js|npm|script|program|app|"
+    r"application|frontend|game|algorithm|function|class|calculator|test|tests|"
+    r"unit test|debug|fix|rewrite|refactor|implement|build)\b",
     re.IGNORECASE,
 )
 
@@ -86,8 +106,15 @@ def _execution_catalog(run):
         return "No sandbox executions yet."
     blocks = []
     for item in rows[-8:]:
+        runtime = str(item.get("runtime") or "python")
+        action = str(item.get("execution_action") or "run_python")
+        target = (
+            item.get("command")
+            if action == "run_npm"
+            else item.get("filename")
+        )
         block = (
-            f"{item.get('filename')} | {item.get('status')} | "
+            f"{runtime}:{action} {target} | {item.get('status')} | "
             f"exit={item.get('exit_code')} | {item.get('duration_ms')} ms"
         )
         stdout_text = str(item.get("stdout") or "").strip()
@@ -102,39 +129,52 @@ def _execution_catalog(run):
 
 def _workspace_debug_context(
     run,
-    max_total_chars=12000,
-    max_file_chars=4000,
+    max_total_chars=16000,
+    max_file_chars=5000,
 ):
-    """
-    Give the local controller a bounded snapshot of the current Python project.
-
-    Multi-file failures often come from contracts spread across imports,
-    implementations and tests. Filenames alone are not enough for an 8B
-    controller to reason reliably about those relationships.
-
-    This stays entirely local and is never sent to the public-only web-query
-    planner.
-    """
+    """Bounded local source snapshot for the active runtime."""
     files = list_workspace_files(
         run["user_id"],
         run["id"],
     )
 
-    python_names = [
+    runtime = effective_runtime(
+        run
+    )
+
+    if runtime == RUNTIME_NODE:
+        source_suffixes = (
+            ".js",
+            ".mjs",
+            ".cjs",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".json",
+            ".html",
+            ".css",
+        )
+    else:
+        source_suffixes = (
+            ".py",
+            ".json",
+            ".txt",
+        )
+
+    names = [
         str(item.get("filename") or "").strip()
         for item in files
-        if str(item.get("filename") or "").lower().endswith(".py")
+        if str(item.get("filename") or "").lower().endswith(source_suffixes)
     ]
 
-    if not python_names:
-        return "No Python workspace files."
+    if not names:
+        return f"No {runtime} workspace source files."
 
     available = {
         name: name
-        for name in python_names
+        for name in names
         if name
     }
-
     priority = []
 
     def add(name):
@@ -145,8 +185,12 @@ def _workspace_debug_context(
         ):
             priority.append(name)
 
-    state = _latest_execution_state(run)
-    latest = state.get("execution")
+    state = _latest_execution_state(
+        run
+    )
+    latest = state.get(
+        "execution"
+    )
 
     if latest:
         add(
@@ -161,47 +205,52 @@ def _workspace_debug_context(
             or ""
         )
 
-        # Traceback filenames.
-        for match in re.findall(
-            r'File "[^"]*/([^/"]+\.py)"',
-            stderr,
-        ):
-            add(match)
+        if runtime == RUNTIME_PYTHON:
+            for match in re.findall(
+                r'File "[^"]*/([^/"]+\.py)"',
+                stderr,
+            ):
+                add(match)
 
-        # Imported local modules implicated by ImportError/tracebacks.
-        for module in re.findall(
-            r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\s+import\b",
-            stderr,
-        ):
-            add(
-                module
-                + ".py"
-            )
+            for module in re.findall(
+                r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\s+import\b",
+                stderr,
+            ):
+                add(module + ".py")
 
-        for module in re.findall(
-            r"\bimport\s+([A-Za-z_][A-Za-z0-9_]*)\b",
-            stderr,
-        ):
-            add(
-                module
-                + ".py"
-            )
+            for module in re.findall(
+                r"\bimport\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                stderr,
+            ):
+                add(module + ".py")
+        else:
+            # Node/Vitest/Jest stack traces commonly include one of these forms.
+            for match in re.findall(
+                r"(?:/runtime/|file://[^\s]*/)([^\s():]+\.(?:js|mjs|cjs|jsx|ts|tsx))",
+                stderr,
+            ):
+                add(match)
 
-    # Tests are especially useful for understanding the expected contract.
-    for name in python_names:
+    # Test files and manifests should be visible early because they define the
+    # expected project contract even before a JS-specific deterministic planner
+    # exists.
+    for name in names:
+        lower = name.lower()
         if (
-            name.lower().startswith("test_")
-            or name.lower().endswith("_test.py")
-            or name.lower() in {
+            lower.startswith("test_")
+            or lower.startswith("test-")
+            or ".test." in lower
+            or ".spec." in lower
+            or lower in {
                 "tests.py",
                 "test.py",
+                "package.json",
+                "requirements.txt",
             }
         ):
             add(name)
 
-    # For small projects include the rest. This is the common ATLAS workspace
-    # case and is much more useful than making the model guess interfaces.
-    for name in python_names:
+    for name in names:
         add(name)
 
     blocks = []
@@ -222,25 +271,131 @@ def _workspace_debug_context(
             continue
 
         remaining = max_total_chars - used
-        content = str(
-            content
-            or ""
-        )[:remaining]
-
-        block = (
-            f"--- {name} ---\n"
-            + content
-        )
-
+        content = str(content or "")[:remaining]
+        block = f"--- {name} ---\n{content}"
         blocks.append(block)
         used += len(block)
 
     return (
         "\n\n".join(blocks)
         if blocks
-        else "Python workspace files could not be read."
+        else "Workspace source files could not be read."
     )
 
+
+def _latest_node_failure_fingerprint(run):
+    rows = [
+        item
+        for item in list_agent_sandbox_executions(
+            run["user_id"],
+            run["id"],
+            limit=12,
+        )
+        if str(item.get("runtime") or "python") == RUNTIME_NODE
+    ]
+
+    if not rows:
+        return {
+            "repeated": 0,
+            "fingerprint": None,
+            "latest": None,
+        }
+
+    latest = rows[-1]
+    if (
+        str(latest.get("status") or "") == "success"
+        and int(latest.get("exit_code") or 0) == 0
+    ):
+        return {
+            "repeated": 0,
+            "fingerprint": None,
+            "latest": latest,
+        }
+
+    def fingerprint(item):
+        stderr = " ".join(
+            str(item.get("stderr") or "").split()
+        )[-1800:]
+        stderr = re.sub(r"\bline\s+\d+\b", "line #", stderr, flags=re.I)
+        stderr = re.sub(r":\d+:\d+\b", ":#:#", stderr)
+        raw = "|".join([
+            str(item.get("execution_action") or ""),
+            str(item.get("filename") or ""),
+            stderr,
+        ])
+        return hashlib.sha1(
+            raw.encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+
+    current = fingerprint(latest)
+    repeated = 0
+    for item in reversed(rows):
+        if (
+            str(item.get("status") or "") == "success"
+            and int(item.get("exit_code") or 0) == 0
+        ):
+            break
+        if fingerprint(item) == current:
+            repeated += 1
+        else:
+            break
+
+    return {
+        "repeated": repeated,
+        "fingerprint": current,
+        "latest": latest,
+    }
+
+
+def _node_controller_model_override(run):
+    # Python already has the richer project-contract escalation layer. Node gets
+    # a conservative senior-controller escalation until its own deterministic
+    # JS contract planner arrives in a later v2.3.x milestone.
+    if str(run.get("model_mode") or "auto").lower() != "auto":
+        return None
+
+    failure = _latest_node_failure_fingerprint(run)
+    if int(failure.get("repeated") or 0) >= 2:
+        return DEEP_MODEL
+
+    return None
+
+
+def _project_context(run):
+    runtime = effective_runtime(run)
+    if runtime == RUNTIME_PYTHON:
+        return project_planner_context(run)
+
+    failure = _latest_node_failure_fingerprint(run)
+    scripts = []
+    try:
+        scripts = list_npm_scripts(
+            run["user_id"],
+            run["id"],
+        )
+    except Exception:
+        scripts = []
+
+    lines = [
+        "Project kind: Node.js",
+        "Deterministic JS symbol/data-flow planner: not enabled in v2.3 foundation.",
+        "Use current source, package.json, sandbox output and test/build scripts as truth.",
+    ]
+    if scripts:
+        lines.append("npm scripts: " + ", ".join(scripts))
+    if failure.get("fingerprint"):
+        lines.append(
+            f"latest failure fingerprint: {failure['fingerprint']}"
+        )
+        lines.append(
+            f"same failure repeated: {int(failure.get('repeated') or 0)}"
+        )
+        if int(failure.get("repeated") or 0) >= 2:
+            lines.append(
+                "Auto model policy: repeated Node failure escalates the next controller call to Deep."
+            )
+
+    return "\n".join(lines)
 
 def _deterministic_unverified_answer(
     run,
@@ -335,16 +490,55 @@ def _deterministic_unverified_answer(
 
 
 def _available_actions(run):
-    actions = list(base_runner._available_actions(run))
-    if _code_enabled(run):
-        for name in ("workspace_list", "workspace_read", "run_python"):
+    actions = list(
+        base_runner._available_actions(run)
+    )
+
+    if not _code_enabled(run):
+        return actions
+
+    runtime = effective_runtime(
+        run
+    )
+
+    for name in (
+        "workspace_list",
+        "workspace_read",
+    ):
+        if name not in actions:
+            actions.append(name)
+
+    if runtime == RUNTIME_NODE:
+        for name in (
+            "run_node",
+            "run_npm",
+        ):
+            if name not in actions:
+                actions.append(name)
+    else:
+        if "run_python" not in actions:
+            actions.append("run_python")
+
+    if project_environment_allowed(
+        run["user_id"],
+        run["id"],
+    ):
+        for name in (
+            "environment_plan",
+            "environment_setup",
+        ):
             if name not in actions:
                 actions.append(name)
 
-        if project_environment_allowed(run["user_id"], run["id"]):
-            for name in ("environment_plan", "environment_setup"):
-                if name not in actions:
-                    actions.append(name)
+    # The v2.1 deterministic project-contract repair planner is Python-specific.
+    # Node uses the generic controller + execution evidence for now.
+    if runtime == RUNTIME_PYTHON:
+        for name in (
+            "project_plan",
+            "project_repair",
+        ):
+            if name not in actions:
+                actions.append(name)
 
     return actions
 
@@ -352,12 +546,20 @@ def _available_actions(run):
 def _latest_python_target(run):
     names = [
         item["filename"]
-        for item in list_workspace_files(run["user_id"], run["id"])
+        for item in list_workspace_files(
+            run["user_id"],
+            run["id"],
+        )
         if str(item.get("filename") or "").lower().endswith(".py")
     ]
     if not names:
         return None
-    lower_map = {name.lower(): name for name in names}
+
+    lower_map = {
+        name.lower(): name
+        for name in names
+    }
+
     for preferred in (
         "test_main.py",
         "test_calculator.py",
@@ -369,9 +571,119 @@ def _latest_python_target(run):
     ):
         if preferred in lower_map:
             return lower_map[preferred]
-    tests = [name for name in names if name.lower().startswith("test_")]
+
+    tests = [
+        name
+        for name in names
+        if name.lower().startswith("test_")
+    ]
     return tests[-1] if tests else names[-1]
 
+
+def _latest_node_target(run):
+    names = [
+        item["filename"]
+        for item in list_workspace_files(
+            run["user_id"],
+            run["id"],
+        )
+        if str(item.get("filename") or "").lower().endswith(
+            (".js", ".mjs", ".cjs")
+        )
+    ]
+
+    if not names:
+        return None
+
+    lower_map = {
+        name.lower(): name
+        for name in names
+    }
+
+    for preferred in (
+        "test.js",
+        "tests.js",
+        "test_app.js",
+        "test-app.js",
+        "app.test.js",
+        "index.test.js",
+        "main.js",
+        "index.js",
+        "app.js",
+        "server.js",
+    ):
+        if preferred in lower_map:
+            return lower_map[preferred]
+
+    tests = [
+        name
+        for name in names
+        if (
+            name.lower().startswith("test")
+            or ".test." in name.lower()
+            or ".spec." in name.lower()
+        )
+    ]
+
+    return tests[-1] if tests else names[-1]
+
+
+def _preferred_node_script(run):
+    try:
+        scripts = list_npm_scripts(
+            run["user_id"],
+            run["id"],
+        )
+    except Exception:
+        scripts = []
+
+    for preferred in (
+        "test",
+        "check",
+        "lint",
+        "typecheck",
+        "build",
+    ):
+        if preferred in scripts:
+            return preferred
+
+    return None
+
+
+def _default_validation_action(run):
+    runtime = effective_runtime(
+        run
+    )
+
+    if runtime == RUNTIME_NODE:
+        script = _preferred_node_script(
+            run
+        )
+        if script:
+            return {
+                "action": "run_npm",
+                "script": script,
+            }
+
+        target = _latest_node_target(
+            run
+        )
+        if target:
+            return {
+                "action": "run_node",
+                "filename": target,
+            }
+        return None
+
+    target = _latest_python_target(
+        run
+    )
+    if target:
+        return {
+            "action": "run_python",
+            "filename": target,
+        }
+    return None
 
 def _has_successful_execution(run):
     return any(
@@ -566,24 +878,38 @@ def _latest_execution_state(run):
     }
 
 
-def _required_retest_target(run):
-    """
-    After a sandbox execution, the first successful code rewrite must be
-    followed by another execution before the controller may keep rewriting.
+def _required_retest_action(run):
+    """Return the exact runtime verification action required after a mutation."""
+    state = _latest_execution_state(
+        run
+    )
+    latest = state[
+        "execution"
+    ]
 
-    This is the deterministic guard that turns:
-        fail -> write -> write -> write...
-    into:
-        fail -> write -> re-test -> observe -> next decision
-    """
-    state = _latest_execution_state(run)
-    latest = state["execution"]
-
-    if not latest or not state["writes_after"]:
+    if not latest or not state[
+        "writes_after"
+    ]:
         return None
 
-    filename = str(latest.get("filename") or "").strip()
-    available = {
+    runtime = str(
+        latest.get(
+            "runtime"
+        )
+        or RUNTIME_PYTHON
+    ).lower()
+    action = str(
+        latest.get(
+            "execution_action"
+        )
+        or (
+            "run_node"
+            if runtime == RUNTIME_NODE
+            else "run_python"
+        )
+    )
+
+    available_names = {
         item["filename"]
         for item in list_workspace_files(
             run["user_id"],
@@ -591,11 +917,74 @@ def _required_retest_target(run):
         )
     }
 
-    if filename and filename in available:
-        return filename
+    if action == "run_npm":
+        command = str(
+            latest.get(
+                "command"
+            )
+            or ""
+        )
+        match = re.search(
+            r"npm\s+run\s+([^\s]+)",
+            command,
+        )
+        script = (
+            match.group(1)
+            if match
+            else _preferred_node_script(run)
+        )
+        if script:
+            return {
+                "action": "run_npm",
+                "script": script,
+            }
 
-    return _latest_python_target(run)
+    filename = str(
+        latest.get(
+            "filename"
+        )
+        or ""
+    ).strip()
 
+    if action == "run_node":
+        if filename and filename in available_names:
+            return {
+                "action": "run_node",
+                "filename": filename,
+            }
+        target = _latest_node_target(
+            run
+        )
+        return (
+            {
+                "action": "run_node",
+                "filename": target,
+            }
+            if target
+            else _default_validation_action(run)
+        )
+
+    if action == "run_python":
+        if filename and filename in available_names:
+            return {
+                "action": "run_python",
+                "filename": filename,
+            }
+        target = _latest_python_target(
+            run
+        )
+        return (
+            {
+                "action": "run_python",
+                "filename": target,
+            }
+            if target
+            else _default_validation_action(run)
+        )
+
+    return _default_validation_action(
+        run
+    )
 
 def _sandbox_verification_summary(run):
     state = _latest_execution_state(run)
@@ -653,10 +1042,19 @@ def _sandbox_verification_summary(run):
 
 
 def _environment_context(run):
+    runtime = effective_runtime(run)
+
     try:
-        status = environment_status_for_run(
-            run["user_id"],
-            run["id"],
+        status = (
+            node_environment_status_for_run(
+                run["user_id"],
+                run["id"],
+            )
+            if runtime == RUNTIME_NODE
+            else environment_status_for_run(
+                run["user_id"],
+                run["id"],
+            )
         )
     except Exception as error:
         return f"Environment status unavailable: {error}"
@@ -668,6 +1066,7 @@ def _environment_context(run):
     )
 
     lines = [
+        f"Runtime: {'Node.js' if runtime == RUNTIME_NODE else 'Python'}",
         f"Profile: {status.get('profile') or 'strict'}",
         f"Status: {status.get('status') or 'base'}",
         f"Ready: {'yes' if status.get('ready') else 'no'}",
@@ -675,7 +1074,10 @@ def _environment_context(run):
     ]
 
     if status.get("profile") == "project":
-        lines.append("Dependency setup network: allowed only during isolated setup/build")
+        registry = "npm registry" if runtime == RUNTIME_NODE else "Python package index"
+        lines.append(
+            f"Dependency setup network: allowed only during isolated setup/build ({registry})"
+        )
 
     if requested:
         lines.append("Requested dependencies: " + ", ".join(requested))
@@ -690,7 +1092,6 @@ def _environment_context(run):
         lines.append("Last environment error: " + str(status.get("last_error"))[-1800:])
 
     return "\n".join(lines)[:5000]
-
 
 def _sandbox_forced_final(run):
     """
@@ -761,52 +1162,72 @@ def _plan_next_action(run):
     available = _available_actions(run)
     current_step = int(run.get("current_step") or 0)
     remaining = max(0, int(run.get("max_steps") or 6) - current_step)
+    runtime = effective_runtime(run)
 
-    # v2.2 dependency-aware environment loop. Manifest changes and dependency
-    # setup are infrastructure actions and must happen BEFORE re-testing a file
-    # that previously failed because its dependency was unavailable.
+    # Runtime-specific dependency discovery/setup always happens before a
+    # deterministic re-test. This prevents an unavailable dependency from being
+    # mistaken for a code defect.
     if (
         project_environment_allowed(run["user_id"], run["id"])
         and "environment_plan" in available
-        and dependency_manifest_needs_update(run["user_id"], run["id"])
         and remaining > 0
     ):
-        return {
-            "action": "environment_plan",
-            "reason": (
-                "The current project source or latest sandbox failure shows an "
-                "undeclared third-party dependency. Add a sanitized dependency manifest "
-                "without changing the requested application architecture."
-            ),
-            "model": "deterministic",
-        }
+        needs_manifest = (
+            node_manifest_needs_update(run["user_id"], run["id"])
+            if runtime == RUNTIME_NODE
+            else dependency_manifest_needs_update(run["user_id"], run["id"])
+        )
+        if needs_manifest:
+            return {
+                "action": "environment_plan",
+                "reason": (
+                    "The current project source shows an undeclared npm dependency. "
+                    "Update package.json without changing the requested architecture."
+                    if runtime == RUNTIME_NODE
+                    else (
+                        "The current project source or latest sandbox failure shows an "
+                        "undeclared Python dependency. Add a sanitized requirements manifest "
+                        "without changing the requested application architecture."
+                    )
+                ),
+                "model": "deterministic",
+            }
 
     if (
         project_environment_allowed(run["user_id"], run["id"])
         and "environment_setup" in available
-        and environment_needs_setup(run["user_id"], run["id"])
         and remaining > 0
     ):
-        return {
-            "action": "environment_setup",
-            "reason": (
-                "Build or reuse the isolated dependency image for the current "
-                "requirements.txt before executing the project again."
-            ),
-            "model": "deterministic",
-        }
+        needs_setup = (
+            node_environment_needs_setup(run["user_id"], run["id"])
+            if runtime == RUNTIME_NODE
+            else environment_needs_setup(run["user_id"], run["id"])
+        )
+        if needs_setup:
+            return {
+                "action": "environment_setup",
+                "reason": (
+                    "Build or reuse the isolated npm dependency image for package.json "
+                    "before executing the Node.js project again."
+                    if runtime == RUNTIME_NODE
+                    else (
+                        "Build or reuse the isolated pip dependency image for the current "
+                        "requirements.txt before executing the Python project again."
+                    )
+                ),
+                "model": "deterministic",
+            }
 
-    # Deterministic engineering-loop guard: once code has been changed after a
-    # sandbox run, test that revision before allowing another speculative edit.
-    retest_target = _required_retest_target(run)
+    # Any workspace mutation after a recorded test must be followed by the same
+    # runtime's verification action before further speculative changes.
+    retest = _required_retest_action(run)
     if (
-        retest_target
-        and "run_python" in available
+        retest
+        and retest.get("action") in available
         and remaining > 0
     ):
         return {
-            "action": "run_python",
-            "filename": retest_target,
+            **retest,
             "reason": (
                 "Re-test the current workspace revision before making another "
                 "code change or claiming completion."
@@ -814,222 +1235,203 @@ def _plan_next_action(run):
             "model": "deterministic",
         }
 
-    # v2.1.1b: maintain a persistent project contract and use it to stop the
-    # normal 8B loop from repeatedly guessing at the same cross-file failure.
-    project_analysis = analyze_project_state(run)
-    project_execution = project_analysis["execution"]
-    project_latest = project_execution.get("latest")
+    project_analysis = None
 
-    if (
-        project_latest
-        and str(project_latest.get("status") or "") == "success"
-        and int(project_latest.get("exit_code") or 0) == 0
-    ):
-        mark_active_plan_resolved(
-            run["user_id"],
-            run["id"],
-        )
+    # The persistent AST project-contract planner is currently Python-specific.
+    # Preserve it unchanged for Python while Node gets a runtime-aware controller
+    # and automatic Deep escalation on repeated failures.
+    if runtime == RUNTIME_PYTHON:
+        project_analysis = analyze_project_state(run)
+        project_execution = project_analysis["execution"]
+        project_latest = project_execution.get("latest")
 
-    # Every planner-guided code repair is now re-tested before another repair.
-    # If that test produces a DIFFERENT failure fingerprint, the previous plan
-    # did useful work but is now stale. Discard its remaining sequence and build
-    # a fresh plan around the new reality instead of applying old assumptions.
-    active_plan = get_active_debug_plan(
-        run["user_id"],
-        run["id"],
-    )
-
-    current_failure_fingerprint = (
-        project_execution[
-            "failure"
-        ].get(
-            "fingerprint"
-        )
-    )
-
-    if (
-        active_plan
-        and project_latest
-        and not (
-            str(
-                project_latest.get(
-                    "status"
-                )
-                or ""
-            )
-            == "success"
-            and int(
-                project_latest.get(
-                    "exit_code"
-                )
-                or 0
-            )
-            == 0
-        )
-        and not active_plan_matches_current_failure(
-            run["user_id"],
-            run["id"],
-            current_failure_fingerprint,
-        )
-    ):
-        mark_active_plan_superseded(
-            run["user_id"],
-            run["id"],
-        )
-
-        active_plan = None
-
-    planned_repair = get_next_project_repair(
-        run["user_id"],
-        run["id"],
-    )
-
-    if (
-        planned_repair
-        and project_latest
-        and not (
-            str(project_latest.get("status") or "") == "success"
+        if (
+            project_latest
+            and str(project_latest.get("status") or "") == "success"
             and int(project_latest.get("exit_code") or 0) == 0
-        )
-        and remaining > 0
-    ):
-        return {
-            "action": "project_repair",
-            "reason": (
-                "Follow the persistent project-contract recovery plan instead "
-                "of making another unstructured cross-file guess."
-            ),
-            "model": planned_repair["plan"]["planner_model"],
-            "plan_id": planned_repair["plan"]["id"],
-            "repair_index": planned_repair["repair_index"],
-            "filename": planned_repair["repair"].get("file"),
-        }
+        ):
+            mark_active_plan_resolved(
+                run["user_id"],
+                run["id"],
+            )
 
-    if (
-        active_plan
-        and project_latest
-        and not planned_repair
-        and not active_plan["plan"].get("blocked_by_environment")
-    ):
-        # The prior structured repair sequence has been consumed but the test
-        # still fails. Close it so a fresh plan can use the new failure state.
-        mark_active_plan_exhausted(
+        active_plan = get_active_debug_plan(
             run["user_id"],
             run["id"],
         )
 
-    if (
-        project_latest
-        and structured_planner_exhausted_for_current_failure(
-            run,
-            project_analysis,
+        current_failure_fingerprint = (
+            project_execution["failure"].get("fingerprint")
         )
-    ):
-        return {
-            "action": "final",
-            "reason": (
-                "The structured planner has already attempted multiple recovery "
-                "plans against the same unchanged failure. Stop the loop and "
-                "report the exact blocker instead of spending more steps on the "
-                "same hypothesis."
-            ),
-            "model": "deterministic",
-        }
 
-    if (
-        project_latest
-        and should_create_debug_plan(
-            run,
-            project_analysis,
-        )
-        and remaining > 0
-    ):
-        return {
-            "action": "project_plan",
-            "reason": (
-                "Build a structured project contract/recovery plan because "
-                "the current failure is cross-file, repeated, or stalled."
-            ),
-            "model": "adaptive",
-        }
+        if (
+            active_plan
+            and project_latest
+            and not (
+                str(project_latest.get("status") or "") == "success"
+                and int(project_latest.get("exit_code") or 0) == 0
+            )
+            and not active_plan_matches_current_failure(
+                run["user_id"],
+                run["id"],
+                current_failure_fingerprint,
+            )
+        ):
+            mark_active_plan_superseded(
+                run["user_id"],
+                run["id"],
+            )
+            active_plan = None
 
-    if (
-        active_plan_blocks_on_environment(
+        planned_repair = get_next_project_repair(
             run["user_id"],
             run["id"],
         )
-        and not project_environment_allowed(
-            run["user_id"],
-            run["id"],
-        )
-    ):
-        return {
-            "action": "final",
-            "reason": (
-                "The structured project plan identified a sandbox environment "
-                "dependency blocker. Preserve the requested architecture and "
-                "report the limitation instead of rewriting it away."
-            ),
-            "model": "deterministic",
-        }
+
+        if (
+            planned_repair
+            and project_latest
+            and not (
+                str(project_latest.get("status") or "") == "success"
+                and int(project_latest.get("exit_code") or 0) == 0
+            )
+            and remaining > 0
+        ):
+            return {
+                "action": "project_repair",
+                "reason": (
+                    "Follow the persistent project-contract recovery plan instead "
+                    "of making another unstructured cross-file guess."
+                ),
+                "model": planned_repair["plan"]["planner_model"],
+                "plan_id": planned_repair["plan"]["id"],
+                "repair_index": planned_repair["repair_index"],
+                "filename": planned_repair["repair"].get("file"),
+            }
+
+        if (
+            active_plan
+            and project_latest
+            and not planned_repair
+            and not active_plan["plan"].get("blocked_by_environment")
+        ):
+            mark_active_plan_exhausted(
+                run["user_id"],
+                run["id"],
+            )
+
+        if (
+            project_latest
+            and structured_planner_exhausted_for_current_failure(
+                run,
+                project_analysis,
+            )
+        ):
+            return {
+                "action": "final",
+                "reason": (
+                    "The structured planner already attempted multiple recovery plans "
+                    "against the same unchanged failure. Report the exact blocker instead "
+                    "of burning more steps on the same hypothesis."
+                ),
+                "model": "deterministic",
+            }
+
+        if (
+            project_latest
+            and should_create_debug_plan(
+                run,
+                project_analysis,
+            )
+            and remaining > 0
+        ):
+            return {
+                "action": "project_plan",
+                "reason": (
+                    "Build a structured Python project contract/recovery plan because "
+                    "the current failure is cross-file, repeated, or stalled."
+                ),
+                "model": "adaptive",
+            }
+
+        if (
+            active_plan_blocks_on_environment(
+                run["user_id"],
+                run["id"],
+            )
+            and not project_environment_allowed(
+                run["user_id"],
+                run["id"],
+            )
+        ):
+            return {
+                "action": "final",
+                "reason": (
+                    "The Python project plan identified a sandbox dependency blocker. "
+                    "Preserve the requested architecture and report the limitation."
+                ),
+                "model": "deterministic",
+            }
+
+    runtime_info = get_agent_run_runtime(
+        run["user_id"],
+        run["id"],
+    )
+    runtime_label = runtime_info.get("label") or runtime
 
     system_prompt = (
-        "You are the controller for a persistent private local AI agent with a "
-        "controlled Docker Python sandbox. Choose exactly ONE next action. Do useful "
-        "work autonomously; do not ask permission for normal research, file inspection, "
-        "testing, debugging, or rewriting.\n\n"
-        "After a failed execution, make the smallest useful repair and re-run before "
-        "making another speculative repair. After a successful execution with no later "
-        "workspace changes, prefer final unless the goal explicitly requires unfinished "
-        "work. Never spend remaining steps rewriting the same already-tested file without "
-        "a concrete reason.\n\n"
-        "MULTI-FILE CONTRACTS:\n"
-        "ATLAS now maintains a deterministic PROJECT CONTRACT containing modules, imports, "
-        "symbols, signatures, callers, tests, failure fingerprints and progress state. Use it "
-        "as authoritative structural evidence. For import errors, missing symbols, constructor/"
-        "signature mismatches, or tests that disagree with implementation, reconcile the whole "
-        "contract. Do not ping-pong rename one file while leaving callers/tests inconsistent. "
-        "If a structured debug plan exists, follow it rather than inventing a competing repair. "
-        "Prefer the smallest coherent cross-file repair.\n\n"
-        "CODING LOOP:\n"
-        "When runnable code is requested and sandbox execution is allowed, prefer an "
-        "engineering loop: create/update file(s) -> execute/test -> inspect stdout/stderr "
-        "-> fix or improve -> re-run -> final. For multi-file work, use workspace_list or "
-        "workspace_read when useful. A failed execution is an observation to debug, not a "
-        "reason to give up. Never claim code works without a successful recorded sandbox "
-        "execution.\n\n"
+        "You are the controller for a persistent private local AI engineering agent "
+        f"using the ATLAS {runtime_label} Docker runtime. Choose exactly ONE next action. "
+        "Do useful work autonomously; do not ask permission for normal file inspection, "
+        "testing, debugging or rewriting.\n\n"
+        "ENGINEERING LOOP:\n"
+        "Create/update files -> execute the smallest useful test/build -> inspect actual "
+        "stdout/stderr -> make a coherent repair -> re-run -> final. A failed execution is "
+        "evidence to debug, not a reason to abandon the requested architecture. Never claim "
+        "code works without a successful recorded sandbox execution against the current "
+        "workspace state.\n\n"
+        "MULTI-FILE CONSISTENCY:\n"
+        "Treat imports, exports, function/class signatures, callers, manifests and tests as "
+        "one project contract. Read related files together before repeatedly renaming or "
+        "rewriting one side of an interface. Python runs may expose a deterministic project "
+        "contract/debug plan; when present, follow it. Node.js v2.3 uses current source, "
+        "package.json and test/build output as the contract and escalates repeated failures "
+        "to the stronger reasoning model in Auto mode.\n\n"
         "SANDBOX SECURITY:\n"
-        "run_python executes only a stored .py workspace file. The disposable container "
-        "has no network, no host shell or Docker socket, a read-only workspace mount, a "
-        "read-only root filesystem, dropped Linux capabilities, and CPU/memory/PID/time "
-        "limits. Do not attempt to bypass these restrictions.\n\n"
+        "Execution is isolated in Docker with network OFF, durable source read-only, a writable "
+        "disposable runtime, no Docker socket, dropped Linux capabilities, and resource/time "
+        "limits. Project dependency setup is separate and may access only the appropriate "
+        "package registry using a sanitized manifest. Do not attempt to bypass restrictions.\n\n"
         "ACTIONS:\n"
-        "- web_search: public search; the existing privacy-isolated query planner chooses "
-        "the actual public query.\n"
-        "- web_fetch: fetch a recorded public source; include source_key.\n"
-        "- document_search: search local indexed documents; include query.\n"
-        "- memory_search: search local personal memory; include query.\n"
-        "- write_file: create or REWRITE a logical workspace text/source file; include "
-        "filename and COMPLETE content. Rewriting the same filename replaces its current "
-        "workspace version.\n"
-        "- workspace_list: list current logical workspace files.\n"
-        "- workspace_read: read one current workspace file; include filename.\n"
-        "- run_python: execute one EXISTING .py workspace file in Docker; filename is REQUIRED. "
-        "Never use run_python to create/populate CSV, JSON, Markdown, or other non-Python files; "
-        "use write_file for those.\n"
-        "- needs_input: pause only for a genuinely important user decision/fact or when "
-        "the goal explicitly asks to involve the user.\n"
-        "- final: finish only when useful work is complete or further progress is not "
-        "reasonable within the remaining budget.\n\n"
-        "In Strict profile prefer standard-library/preinstalled dependencies. In Project "
-        "profile preserve legitimately requested third-party frameworks and use the controlled "
-        "requirements/environment flow rather than rewriting the architecture merely to avoid "
-        "a dependency. Return ONLY one JSON object."
+        "- web_search / web_fetch / document_search / memory_search: existing research tools.\n"
+        "- write_file: create or replace a complete logical workspace file.\n"
+        "- workspace_list / workspace_read: inspect current workspace files.\n"
+        "- run_python: Python only; execute one existing .py file.\n"
+        "- run_node: Node.js only; execute one existing .js/.mjs/.cjs file.\n"
+        "- run_npm: Node.js only; execute one EXISTING package.json script; include script. "
+        "Prefer test for verification and build for frontend/build validation.\n"
+        "- environment_plan: add a deterministically detected missing dependency to the "
+        "runtime manifest (requirements.txt or package.json).\n"
+        "- environment_setup: build/reuse the isolated dependency image.\n"
+        "- project_plan / project_repair: Python deterministic debug planner actions only.\n"
+        "- needs_input: only for a genuinely important user decision/fact.\n"
+        "- final: only when useful work is complete or further progress is not reasonable.\n\n"
+        "In Strict profile do not invent dependency downloads. In Project profile preserve "
+        "legitimately requested frameworks and use the controlled pip/npm setup instead of "
+        "rewriting the project to avoid dependencies. Return ONLY one JSON object."
+    )
+
+    project_context = (
+        project_planner_context(run, project_analysis)
+        if runtime == RUNTIME_PYTHON and project_analysis is not None
+        else _project_context(run)
     )
 
     user_prompt = (
         "GOAL:\n"
         + str(run.get("goal") or "")
+        + "\n\nACTIVE RUNTIME:\n"
+        + f"selected={runtime_info.get('selected_runtime')} | effective={runtime_label}"
         + "\n\nUSER INPUT RECEIVED DURING THIS RUN:\n"
         + base_runner._inputs_text(run)
         + "\n\nAVAILABLE ACTIONS:\n"
@@ -1037,45 +1439,51 @@ def _plan_next_action(run):
         + f"\n\nSTEP BUDGET REMAINING: {remaining}"
         + "\n\nWORKSPACE FILES:\n"
         + _workspace_catalog(run)
-        + "\n\nPERSISTENT PROJECT CONTRACT / DEBUG STATE:\n"
-        + project_planner_context(run, project_analysis)
+        + "\n\nPROJECT / DEBUG STATE:\n"
+        + project_context
         + "\n\nCURRENT WORKSPACE CONTENT (LOCAL, BOUNDED):\n"
         + _workspace_debug_context(run)
         + "\n\nSANDBOX EXECUTION HISTORY:\n"
         + _execution_catalog(run)
+        + "\n\nENVIRONMENT:\n"
+        + _environment_context(run)
         + "\n\nSOURCE CATALOG:\n"
         + (base_runner._source_catalog(run) or "No sources recorded.")
         + "\n\nRUN LEDGER:\n"
         + (base_runner._step_ledger(run) or "No steps have run yet.")
-        + "\n\nJSON KEYS:\naction, reason, query, source_key, filename, content, question"
+        + "\n\nJSON KEYS:\naction, reason, query, source_key, filename, content, script, question"
     )
 
     last_error = None
     for attempt in range(2):
         retry_note = ""
-
         if attempt:
             retry_note = (
                 "\n\nPrevious action was invalid: "
-                + str(
-                    last_error
-                    or "missing required action data"
-                )
-                + "\nRe-plan from the current workspace, CURRENT WORKSPACE CONTENT, "
-                + "execution history and ledger. Do not repeat the invalid action. "
-                + "For multi-file failures, reconcile the implementation/test contract "
-                + "before editing. Return strict JSON only."
+                + str(last_error or "missing required action data")
+                + "\nRe-plan from current files and actual execution evidence. "
+                "Do not repeat the invalid action. Return strict JSON only."
             )
+
+        model_override = (
+            _node_controller_model_override(run)
+            if runtime == RUNTIME_NODE
+            else None
+        )
 
         raw, model = base_runner._run_model(
             run,
             system_prompt,
-            user_prompt
-            + retry_note,
+            user_prompt + retry_note,
             response_format="json",
+            model_override=model_override,
         )
+
         try:
-            data = base_runner._safe_json_object(raw, "sandbox agent controller")
+            data = base_runner._safe_json_object(
+                raw,
+                "sandbox agent controller",
+            )
         except base_runner.AgentExecutionError as error:
             last_error = error
             continue
@@ -1101,97 +1509,101 @@ def _plan_next_action(run):
         }
 
         if action == "run_python":
-            requested = str(
-                data.get("filename")
-                or ""
-            ).strip()
-
-            target = (
-                requested
-                or _latest_python_target(
-                    run
-                )
-            )
-
+            requested = str(data.get("filename") or "").strip()
+            target = requested or _latest_python_target(run)
             if (
                 not target
                 or target not in workspace_names
                 or not target.lower().endswith(".py")
             ):
                 last_error = base_runner.AgentExecutionError(
-                    "run_python requires the filename of an existing .py workspace file. "
-                    "If the task is creating CSV/JSON/Markdown/data, use write_file instead."
+                    "run_python requires the filename of an existing .py workspace file."
                 )
                 continue
-
             data["filename"] = target
 
-        elif action == "workspace_read":
-            filename = str(
-                data.get("filename")
-                or ""
-            ).strip()
-
+        elif action == "run_node":
+            requested = str(data.get("filename") or "").strip()
+            target = requested or _latest_node_target(run)
             if (
-                not filename
-                or filename not in workspace_names
+                not target
+                or target not in workspace_names
+                or not target.lower().endswith((".js", ".mjs", ".cjs"))
             ):
+                last_error = base_runner.AgentExecutionError(
+                    "run_node requires an existing .js, .mjs, or .cjs workspace file."
+                )
+                continue
+            data["filename"] = target
+
+        elif action == "run_npm":
+            script = str(data.get("script") or "").strip()
+            try:
+                scripts = list_npm_scripts(
+                    run["user_id"],
+                    run["id"],
+                )
+            except AgentSandboxError as error:
+                last_error = base_runner.AgentExecutionError(str(error))
+                continue
+
+            if not script:
+                script = _preferred_node_script(run) or ""
+            if not script or script not in scripts:
+                last_error = base_runner.AgentExecutionError(
+                    "run_npm requires the name of an existing package.json script. "
+                    + (f"Available: {', '.join(scripts)}" if scripts else "No scripts are defined.")
+                )
+                continue
+            data["script"] = script
+
+        elif action == "workspace_read":
+            filename = str(data.get("filename") or "").strip()
+            if not filename or filename not in workspace_names:
                 last_error = base_runner.AgentExecutionError(
                     "workspace_read requires the filename of an existing workspace file."
                 )
                 continue
-
             data["filename"] = filename
 
         elif action == "write_file":
-            filename = str(
-                data.get("filename")
-                or ""
-            ).strip()
-
+            filename = str(data.get("filename") or "").strip()
             if not filename:
                 last_error = base_runner.AgentExecutionError(
-                    "write_file requires a workspace filename. Choose a clear filename "
-                    "appropriate for the requested artifact."
+                    "write_file requires a workspace filename."
                 )
                 continue
-
             if data.get("content") is None:
                 last_error = base_runner.AgentExecutionError(
                     "write_file requires complete file content."
                 )
                 continue
-
             data["filename"] = filename
 
         if (
             action == "final"
             and _CODE_GOAL_RE.search(str(run.get("goal") or ""))
             and remaining > 1
+            and not _has_successful_execution(run)
         ):
-            target = _latest_python_target(run)
-            if target and not _has_successful_execution(run):
-                data["action"] = "run_python"
-                data["filename"] = target
+            validation = _default_validation_action(run)
+            if validation and validation.get("action") in available:
+                data.update(validation)
                 data["reason"] = (
-                    "Validate the runnable Python workspace before claiming completion."
+                    f"Validate the runnable {runtime_label} workspace before claiming completion."
                 )
 
         return data
 
-    # A malformed filename/action should never strand a persistent run in
-    # "running". If the controller twice fails validation, close the loop with a
-    # normal finalization step rather than executing an invalid sandbox call.
     return {
         "action": "final",
         "reason": (
-            "The controller could not produce a valid next file/sandbox action "
-            "after re-planning. Finalize the useful work completed so far and "
-            "state any incomplete deliverable clearly."
+            "The controller could not produce a valid next workspace/runtime action "
+            "after re-planning. Finalize the useful work completed so far and state "
+            "any incomplete deliverable clearly."
         ),
         "model": "deterministic",
     }
-
 
 def _execute_workspace_list(run):
     files = list_workspace_files(run["user_id"], run["id"])
@@ -1212,8 +1624,8 @@ def _execute_write_file(run, filename, content):
     verb = "Updated" if result.get("updated") else "Created"
     return (
         f"{verb} workspace file: {result['filename']} ({result['size_bytes']} bytes). "
-        "It is stored locally and is only executed when the agent explicitly selects "
-        "the run_python sandbox action."
+        "It is stored locally and is executed only when the Agent explicitly selects "
+        "an allowed sandbox runtime action."
     )
 
 
@@ -1228,12 +1640,56 @@ def _execute_run_python(run, step, filename):
         )
     except AgentSandboxUnavailable as error:
         raise base_runner.AgentToolUnavailable(
-            "Sandboxed code execution is unavailable. " + str(error)
+            "Sandboxed Python execution is unavailable. " + str(error)
+        ) from error
+    return format_execution_observation(execution)[: base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
+
+def _execute_run_node(run, step, filename):
+    try:
+        execution = run_node_sandbox(
+            run["user_id"],
+            run["id"],
+            filename,
+            step_id=step["id"],
+            cancel_check=lambda: base_runner._control_probe(run, force=True),
+        )
+    except AgentSandboxUnavailable as error:
+        raise base_runner.AgentToolUnavailable(
+            "Sandboxed Node.js execution is unavailable. " + str(error)
+        ) from error
+    return format_execution_observation(execution)[: base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
+
+def _execute_run_npm(run, step, script):
+    try:
+        execution = run_npm_script_sandbox(
+            run["user_id"],
+            run["id"],
+            script,
+            step_id=step["id"],
+            cancel_check=lambda: base_runner._control_probe(run, force=True),
+        )
+    except AgentSandboxUnavailable as error:
+        raise base_runner.AgentToolUnavailable(
+            "Sandboxed npm execution is unavailable. " + str(error)
         ) from error
     return format_execution_observation(execution)[: base_runner.AGENT_STEP_OUTPUT_LIMIT]
 
 
 def _execute_environment_plan(run):
+    if effective_runtime(run) == RUNTIME_NODE:
+        result = add_missing_node_dependency_to_manifest(
+            run["user_id"],
+            run["id"],
+        )
+        return (
+            f"Updated {result['file']['filename']} for detected npm dependency "
+            f"{result['package']} from {result.get('detected_in') or 'workspace source'}.\n"
+            "The network-enabled setup build receives only a sanitized dependency manifest; "
+            "project source and user npm scripts are not copied into that build context."
+        )[:base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
     result = add_missing_dependency_to_manifest(
         run["user_id"],
         run["id"],
@@ -1247,6 +1703,14 @@ def _execute_environment_plan(run):
 
 
 def _execute_environment_setup(run):
+    if effective_runtime(run) == RUNTIME_NODE:
+        result = setup_node_project_environment(
+            run["user_id"],
+            run["id"],
+            cancel_check=lambda: base_runner._control_probe(run, force=True),
+        )
+        return format_node_environment_observation(result)[:base_runner.AGENT_STEP_OUTPUT_LIMIT]
+
     result = setup_project_environment(
         run["user_id"],
         run["id"],
@@ -1256,6 +1720,10 @@ def _execute_environment_setup(run):
 
 
 def _execute_project_plan(run):
+    if effective_runtime(run) != RUNTIME_PYTHON:
+        raise AgentSandboxError(
+            "The deterministic project-contract planner currently supports Python projects only."
+        )
     analysis = analyze_project_state(run)
     plan = create_debug_plan(
         run,
@@ -1265,7 +1733,47 @@ def _execute_project_plan(run):
 
 
 def _execute_project_repair(run):
+    if effective_runtime(run) != RUNTIME_PYTHON:
+        raise AgentSandboxError(
+            "The deterministic project repair planner currently supports Python projects only."
+        )
     return execute_project_repair(run)
+
+def _sandbox_tool_name(action):
+    return {
+        "run_python": "agent.sandbox.python",
+        "run_node": "agent.sandbox.node",
+        "run_npm": "agent.sandbox.npm",
+    }.get(action)
+
+
+def _execute_runtime_action(run, step, action_data):
+    action = str(action_data.get("action") or "")
+
+    if action == "run_python":
+        return _execute_run_python(
+            run,
+            step,
+            action_data.get("filename"),
+        )
+
+    if action == "run_node":
+        return _execute_run_node(
+            run,
+            step,
+            action_data.get("filename"),
+        )
+
+    if action == "run_npm":
+        return _execute_run_npm(
+            run,
+            step,
+            action_data.get("script"),
+        )
+
+    raise AgentSandboxError(
+        f"Unsupported sandbox runtime action: {action}"
+    )
 
 
 def execute_agent_run(user_id, run_id):
@@ -1305,36 +1813,40 @@ def execute_agent_run(user_id, run_id):
                 # the LLM another planning/editing step; it only tests the current
                 # revision so a run never ends merely because the repair consumed
                 # the last budget slot.
-                retest_target = _required_retest_target(run)
+                retest_action = _required_retest_action(run)
+                available_actions = _available_actions(run)
 
                 if (
-                    retest_target
-                    and "run_python" in _available_actions(run)
+                    retest_action
+                    and retest_action.get("action") in available_actions
                 ):
+                    verification_action = retest_action["action"]
+                    verification_input = {
+                        **retest_action,
+                        "verification_tail": True,
+                    }
+
                     verification_step = begin_agent_step(
                         user_id,
                         run_id,
                         phase="verification",
-                        action="run_python",
-                        tool_name="agent.sandbox.python",
+                        action=verification_action,
+                        tool_name=_sandbox_tool_name(verification_action),
                         reason=(
                             "Mandatory final verification of the workspace revision "
                             "created on the last nominal step."
                         ),
-                        input_data={
-                            "filename": retest_target,
-                            "verification_tail": True,
-                        },
+                        input_data=verification_input,
                     )
 
                     verification_output = ""
                     verification_status = "completed"
 
                     try:
-                        verification_output = _execute_run_python(
+                        verification_output = _execute_runtime_action(
                             run,
                             verification_step,
-                            retest_target,
+                            verification_input,
                         )
                     except AgentSandboxError as error:
                         verification_output = (
@@ -1369,9 +1881,7 @@ def execute_agent_run(user_id, run_id):
                         run,
                         verification_step,
                         {
-                            "action": "run_python",
-                            "filename": retest_target,
-                            "verification_tail": True,
+                            **verification_input,
                             "reason": (
                                 "Mandatory final verification of the workspace "
                                 "revision created on the last nominal step."
@@ -1401,6 +1911,8 @@ def execute_agent_run(user_id, run_id):
                 "workspace_list": "agent.workspace.list",
                 "workspace_read": "agent.workspace.read",
                 "run_python": "agent.sandbox.python",
+                "run_node": "agent.sandbox.node",
+                "run_npm": "agent.sandbox.npm",
                 "environment_plan": "agent.environment.plan",
                 "environment_setup": "agent.environment.setup",
                 "project_plan": "agent.project.plan",
@@ -1445,8 +1957,12 @@ def execute_agent_run(user_id, run_id):
                     output = _execute_workspace_list(run)
                 elif action == "workspace_read":
                     output = _execute_workspace_read(run, action_data.get("filename"))
-                elif action == "run_python":
-                    output = _execute_run_python(run, step, action_data.get("filename"))
+                elif action in {"run_python", "run_node", "run_npm"}:
+                    output = _execute_runtime_action(
+                        run,
+                        step,
+                        action_data,
+                    )
                 elif action == "environment_plan":
                     output = _execute_environment_plan(run)
                 elif action == "environment_setup":
