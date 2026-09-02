@@ -7,7 +7,6 @@ from app.database import user_has_permission
 from app.services.agent_engine import agent_engine_status, start_agent_run
 from app.services.agents import (
     AgentStoreError,
-    add_agent_input,
     create_agent_run,
     delete_agent_run,
     get_agent_artifact_path,
@@ -19,9 +18,14 @@ from app.services.agents import (
     list_agent_runs,
     list_agent_sources,
     list_agent_steps,
-    queue_agent_resume,
     request_agent_cancel,
     request_agent_pause,
+)
+from app.services.agent_stop_integrity import agent_stop_status
+from app.services.agent_run_governance import (
+    agent_budget_status,
+    provide_agent_input_with_budget,
+    resume_agent_run_with_budget,
 )
 from app.services.agent_sandbox import (
     AGENT_CODE_PERMISSION,
@@ -174,6 +178,14 @@ def _decorate_run(user_id, run):
             or "base"
         )
 
+    try:
+        result["continuation_budget"] = agent_budget_status(
+            user_id,
+            run["id"],
+        )
+    except AgentStoreError:
+        result["continuation_budget"] = None
+
     return result
 
 
@@ -256,6 +268,7 @@ def _run_detail(user_id, run_id):
         ),
         "project_environment": project_environment,
         "environment_builds": environment_builds,
+        "stop_integrity": agent_stop_status(user_id, run_id),
     }
 
 
@@ -390,24 +403,40 @@ def cancel_run(run_id):
 @permission_required("agent.use")
 def resume_run(run_id):
     user_id = get_current_user_id()
+    payload = _payload()
     try:
-        run = queue_agent_resume(user_id, run_id)
+        run, budget = resume_agent_run_with_budget(
+            user_id,
+            run_id,
+            additional_steps=payload.get("additional_steps"),
+        )
     except AgentStoreError as error:
         return _error(error)
     start_agent_run(user_id, run_id)
-    return jsonify({"run": _decorate_run(user_id, run)}), 202
+    return jsonify({
+        "run": _decorate_run(user_id, run),
+        "continuation_budget": budget,
+    }), 202
 
 
 @agent_api_bp.post("/runs/<run_id>/input")
 @permission_required("agent.use")
 def provide_agent_input(run_id):
     user_id = get_current_user_id()
+    payload = _payload()
     try:
-        run = add_agent_input(user_id, run_id, _payload().get("content"))
+        run, budget = provide_agent_input_with_budget(
+            user_id,
+            run_id,
+            payload.get("content"),
+        )
     except AgentStoreError as error:
         return _error(error)
     start_agent_run(user_id, run_id)
-    return jsonify({"run": _decorate_run(user_id, run)}), 202
+    return jsonify({
+        "run": _decorate_run(user_id, run),
+        "continuation_budget": budget,
+    }), 202
 
 
 @agent_api_bp.delete("/runs/<run_id>")
@@ -421,7 +450,6 @@ def delete_run(run_id):
     if not deleted:
         return _error("Agent run was not found.", 404)
     return jsonify({"deleted": True, "run_id": run_id})
-
 
 
 @agent_api_bp.get("/artifacts/<artifact_id>/preview")
@@ -473,8 +501,7 @@ def agent_artifact_version_preview(
         preview = preview_artifact(
             user_id,
             artifact_id,
-            version_id=
-                version_id,
+            version_id=version_id,
         )
     except AgentFileVersionError as error:
         return _error(error, 400)
@@ -541,12 +568,9 @@ def agent_artifact_version_content(
             artifact.get("mime_type")
             or "application/octet-stream"
         ),
-        download_name=
-            filename,
-        as_attachment=
-            True,
-        conditional=
-            True,
+        download_name=filename,
+        as_attachment=True,
+        conditional=True,
     )
 
     response.headers[

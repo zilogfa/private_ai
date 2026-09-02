@@ -977,14 +977,11 @@ def node_environment_needs_setup(
         run_id,
     )
 
+    # v2.3.0a: a non-empty dependency list does not mean setup is still needed.
+    # Once the exact manifest's image is ready/cached, execution should proceed.
     return bool(
-        (
-            status.get(
-                "current_requirements"
-            )
-            or not status.get(
-                "ready"
-            )
+        not status.get(
+            "ready"
         )
         and not status.get(
             "failed_current"

@@ -16,6 +16,9 @@ from app.services.agent_revision import (
     begin_user_revision,
     list_run_revisions,
 )
+from app.services.agent_stop_integrity import (
+    clear_active_run_stop,
+)
 
 
 agent_revision_api_bp = Blueprint(
@@ -108,6 +111,10 @@ def revise(
                         True,
                     )
                 ),
+        )
+        clear_active_run_stop(
+            user_id,
+            run_id,
         )
     except AgentRevisionError as error:
         return _error(
