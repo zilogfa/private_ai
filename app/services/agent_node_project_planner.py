@@ -1,5 +1,5 @@
 """
-ATLAS v2.3.1 - Deterministic Node/JavaScript Project Contract + Debug Planner.
+ATLAS v2.3.1a - Deterministic Node/JavaScript Project Contract + Debug Planner.
 
 This is the Node/JavaScript analyzer/planner implementation behind the shared
 Project Intelligence facade. It keeps project debugging explicit and persistent
@@ -34,6 +34,13 @@ from app.services.agent_sandbox import (
     read_workspace_file,
     sandbox_runtime_profile,
     write_workspace_file,
+)
+from app.services.agent_acceptance_contract import (
+    acceptance_summary,
+    evaluate_acceptance_contract,
+    get_or_create_acceptance_contract,
+    is_test_file,
+    validate_test_candidate,
 )
 from app.services.agent_project_planner import (
     AGENT_EXPERT_MODEL,
@@ -321,8 +328,13 @@ def _extract_class_methods(source, masked, class_match):
         r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^)]*)\)\s*\{"
     )
 
+    reserved_control_words = {
+        "if", "for", "while", "switch", "catch", "with", "else", "do", "try",
+    }
     for match in method_re.finditer(body_masked):
         name = match.group(1)
+        if name in reserved_control_words:
+            continue
         params = body_source[match.start(2):match.end(2)]
         methods[name] = _signature_from_param_text(params)
 
@@ -674,6 +686,105 @@ def _arity_issue(call, signature, label):
     return None
 
 
+
+def _invalid_node_test_context_assertions(filename, source):
+    """
+    node:test passes a TestContext object to the test callback.  It is not an
+    assertion library and does not expose helpers such as t.equal()/t.true().
+    Detect this deterministic verifier defect so the planner is allowed to
+    repair test mechanics without changing the test specification.
+    """
+    text = str(source or "")
+    callback_names = set()
+    callback_re = re.compile(
+        r"\b(?:test|it)\s*\(.*?,\s*(?:async\s*)?\(?\s*"
+        r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\)?\s*=>",
+        re.S,
+    )
+    for match in callback_re.finditer(text):
+        callback_names.add(match.group(1))
+
+    issues = []
+    invalid_methods = {
+        "equal",
+        "strictEqual",
+        "deepEqual",
+        "deepStrictEqual",
+        "true",
+        "false",
+        "ok",
+    }
+    for callback in callback_names:
+        pattern = re.compile(
+            r"\b" + re.escape(callback)
+            + r"\.([A-Za-z_$][A-Za-z0-9_$]*)\s*\("
+        )
+        for match in pattern.finditer(text):
+            method = match.group(1)
+            if method not in invalid_methods:
+                continue
+            issues.append(
+                {
+                    "type": "invalid_node_test_context_assertion",
+                    "file": filename,
+                    "line": _line_number(text, match.start()),
+                    "message": (
+                        f"{filename} calls {callback}.{method}(), but node:test "
+                        "TestContext is not an assertion library. Use a built-in "
+                        "assert module while preserving the same test behavior."
+                    ),
+                    "severity": "high",
+                }
+            )
+    return issues
+
+def _uncaptured_expected_throw_assertions(filename, source):
+    """
+    Detect a mechanical verifier defect where a test invokes the exact throwing
+    expression immediately before assert.throws() tries to capture it.  The
+    unguarded pre-call aborts the test before the assertion can run.
+    """
+    text = str(source or "")
+    lines = text.splitlines()
+    issues = []
+
+    def normalize(value):
+        value = str(value or "").strip()
+        value = re.sub(r"^await\s+", "", value)
+        value = value.rstrip(";").strip()
+        return re.sub(r"\s+", "", value)
+
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*await\s+(.+?)\s*;\s*$", line)
+        if not match:
+            continue
+        expression = normalize(match.group(1))
+        window = "\n".join(lines[index + 1 : min(len(lines), index + 8)])
+        throws_match = re.search(
+            r"assert\.throws\s*\(\s*\(\s*\)\s*=>\s*([^,\n]+?)\s*,",
+            window,
+            re.S,
+        )
+        if not throws_match:
+            continue
+        if normalize(throws_match.group(1)) != expression:
+            continue
+        issues.append(
+            {
+                "type": "uncaptured_expected_throw",
+                "file": filename,
+                "line": index + 1,
+                "message": (
+                    f"{filename} invokes {match.group(1).strip()} before assert.throws() "
+                    "tries to capture the same expected exception. Remove only the unguarded "
+                    "pre-call so the verifier can observe the intended error."
+                ),
+                "severity": "high",
+            }
+        )
+    return issues
+
+
 def build_node_project_contract(run):
     files = list_workspace_files(
         run["user_id"],
@@ -748,6 +859,26 @@ def build_node_project_contract(run):
     }
 
     issues = []
+
+    # Deterministic test-harness integrity.  A broken verifier must be repaired
+    # as a verifier defect, not "solved" by weakening/removing test coverage.
+    for info in analyzed:
+        if info.get("tests") or info["filename"] in [
+            item["filename"] for item in analyzed
+            if item["filename"].lower().startswith("test")
+        ]:
+            issues.extend(
+                _invalid_node_test_context_assertions(
+                    info["filename"],
+                    sources.get(info["filename"], ""),
+                )
+            )
+            issues.extend(
+                _uncaptured_expected_throw_assertions(
+                    info["filename"],
+                    sources.get(info["filename"], ""),
+                )
+            )
 
     # Validate local import contracts.
     for info in analyzed:
@@ -1157,6 +1288,34 @@ def analyze_node_project_state(run):
     contract = build_node_project_contract(run)
     execution = _execution_analysis(run)
     churn = _repair_churn(run)
+    acceptance = evaluate_acceptance_contract(
+        run,
+        contract,
+        sandbox_verified=None,
+    )
+
+    latest = execution.get("latest")
+    execution_verified = bool(
+        latest
+        and str(latest.get("status") or "") == "success"
+        and int(latest.get("exit_code") or 0) == 0
+    )
+    fingerprint_parts = []
+    if not execution_verified and execution["failure"].get("fingerprint"):
+        fingerprint_parts.append(
+            "execution:" + str(execution["failure"]["fingerprint"])
+        )
+    if not acceptance.get("satisfied") and acceptance.get("fingerprint"):
+        fingerprint_parts.append(
+            "acceptance:" + str(acceptance["fingerprint"])
+        )
+    planning_fingerprint = (
+        hashlib.sha1(
+            "|".join(fingerprint_parts).encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+        if fingerprint_parts
+        else None
+    )
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -1207,7 +1366,7 @@ def analyze_node_project_state(run):
             str(run["id"]),
             int(run["user_id"]),
             json.dumps(contract, ensure_ascii=False),
-            execution["failure"]["fingerprint"],
+            planning_fingerprint,
             int(execution["repeated_failure_count"]),
             execution["progress_state"],
             len(contract["issues"]),
@@ -1222,6 +1381,8 @@ def analyze_node_project_state(run):
     return {
         "contract": contract,
         "execution": execution,
+        "acceptance": acceptance,
+        "planning_fingerprint": planning_fingerprint,
         "repair_churn_count": churn,
         "escalation_count": escalation_count,
     }
@@ -1273,7 +1434,7 @@ def node_active_plan_matches_current_failure(
 
 def structured_node_planner_exhausted_for_current_failure(run, analysis=None):
     analysis = analysis or analyze_node_project_state(run)
-    fingerprint = analysis["execution"]["failure"].get("fingerprint")
+    fingerprint = analysis.get("planning_fingerprint")
     if not fingerprint:
         return False
     if AGENT_EXPERT_MODEL:
@@ -1288,7 +1449,8 @@ def structured_node_planner_exhausted_for_current_failure(run, analysis=None):
         analysis["execution"].get("repeated_failure_count")
         or 0
     )
-    return plan_count >= 2 and repeated >= 2
+    acceptance_incomplete = not (analysis.get("acceptance") or {}).get("satisfied", True)
+    return plan_count >= 2 and (repeated >= 2 or acceptance_incomplete)
 
 
 def should_create_node_debug_plan(run, analysis=None):
@@ -1297,10 +1459,11 @@ def should_create_node_debug_plan(run, analysis=None):
 
     if not latest:
         return False
-    if (
+    execution_verified = bool(
         str(latest.get("status") or "") == "success"
         and int(latest.get("exit_code") or 0) == 0
-    ):
+    )
+    if execution_verified and (analysis.get("acceptance") or {}).get("satisfied", True):
         return False
 
     active = get_active_debug_plan(
@@ -1321,6 +1484,8 @@ def should_create_node_debug_plan(run, analysis=None):
     churn = int(analysis.get("repair_churn_count") or 0)
     failure_type = str(execution["failure"].get("type") or "")
 
+    if not (analysis.get("acceptance") or {}).get("satisfied", True):
+        return True
     if contract["issues"]:
         return True
     if repeated >= 2 or churn >= 2:
@@ -1361,8 +1526,9 @@ def _choose_planner_model(run, analysis):
         or 0
     )
     issues = len(analysis["contract"]["issues"])
+    acceptance_issues = int((analysis.get("acceptance") or {}).get("issue_count") or 0)
     churn = int(analysis.get("repair_churn_count") or 0)
-    fingerprint = analysis["execution"]["failure"].get("fingerprint")
+    fingerprint = analysis.get("planning_fingerprint")
     plan_count = _debug_plan_count_for_failure(
         run["user_id"],
         run["id"],
@@ -1375,7 +1541,7 @@ def _choose_planner_model(run, analysis):
         and (
             repeated >= 4
             or plan_count >= 2
-            or issues >= 6
+            or issues + acceptance_issues >= 6
         )
     ):
         return {
@@ -1384,13 +1550,18 @@ def _choose_planner_model(run, analysis):
             "escalated": True,
         }
 
+    # v2.4: old lifetime repair churn must not permanently force every new
+    # project decision onto the slow reasoning model. Small/local projects stay
+    # worker-first; escalation is reserved for a repeated plan against the SAME
+    # current fingerprint or materially larger project complexity.
+    file_count = int(analysis.get("contract", {}).get("file_count") or 0)
+    complexity = issues + acceptance_issues
     if (
         AUTO_ESCALATION_ENABLED
         and (
-            repeated >= 2
-            or issues > 0
-            or churn >= 2
-            or plan_count >= 1
+            plan_count >= 1
+            or file_count > 10
+            or complexity >= 10
         )
     ):
         return {
@@ -1418,6 +1589,8 @@ def _contract_summary(analysis):
         f"Repeated latest failure: {execution['repeated_failure_count']}",
         f"Recent repair churn: {analysis['repair_churn_count']}",
     ]
+
+    lines.append(acceptance_summary(analysis.get("acceptance")))
 
     package = contract.get("package") or {}
     scripts = package.get("scripts") or {}
@@ -1608,26 +1781,210 @@ def _environment_profile_text(run):
     )
 
 
-def _run_planner_model(run, system_prompt, user_prompt, model):
-    try:
-        return base_runner._run_model(
+def _run_structured_model(
+    run,
+    system_prompt,
+    user_prompt,
+    models,
+    label,
+    validator=None,
+):
+    """
+    Structured-output reliability belongs inside one logical Agent action.
+
+    A malformed JSON response or a semantically invalid repair target should
+    not consume another lifetime Agent step.  Re-prompt/fallback happens here,
+    while the outer step ledger still records one project_plan/project_repair.
+    """
+    last_error = None
+    last_raw = ""
+
+    for attempt, model in enumerate(list(models)[:3], start=1):
+        retry_note = ""
+        if last_error:
+            retry_note = (
+                "\n\nINTERNAL STRUCTURED-OUTPUT RETRY:\n"
+                f"The previous response was rejected: {last_error}\n"
+                "Return one strict JSON object matching the requested schema. "
+                "Do not repeat the rejected mistake."
+            )
+            if last_raw:
+                retry_note += (
+                    "\nPrevious response excerpt:\n"
+                    + last_raw[-1800:]
+                )
+
+        try:
+            raw, actual_model = base_runner._run_model(
+                run,
+                system_prompt,
+                user_prompt + retry_note,
+                response_format="json",
+                model_override=model,
+            )
+        except Exception as error:
+            last_error = str(error)
+            last_raw = ""
+            continue
+
+        last_raw = str(raw or "")
+        try:
+            data = base_runner._safe_json_object(
+                raw,
+                label,
+            )
+        except Exception as error:
+            last_error = str(error)
+            continue
+
+        if validator:
+            validation_error = validator(data)
+            if validation_error:
+                last_error = str(validation_error)
+                continue
+
+        return data, actual_model
+
+    raise AgentNodeProjectPlannerError(
+        f"{label} could not produce a valid structured result inside its internal retry budget"
+        + (f": {last_error}" if last_error else ".")
+    )
+
+
+def _test_repair_allowed(filename, analysis):
+    if not is_test_file(filename, analysis.get("contract")):
+        return False
+
+    test_issue_types = {
+        "insufficient_test_count",
+        "missing_required_test_behavior",
+    }
+    if any(
+        issue.get("type") in test_issue_types
+        for issue in (analysis.get("acceptance") or {}).get("issues") or []
+    ):
+        return True
+
+    if any(
+        issue.get("file") == filename
+        and issue.get("type") in {
+            "invalid_node_test_context_assertion",
+            "uncaptured_expected_throw",
+            "missing_local_module",
+            "missing_export",
+            "signature_mismatch",
+        }
+        for issue in analysis.get("contract", {}).get("issues") or []
+    ):
+        return True
+
+    failure = analysis.get("execution", {}).get("failure") or {}
+    location = str(failure.get("location") or "")
+    return bool(
+        location.startswith(filename + ":")
+        and str(failure.get("type") or "") in {
+            "SyntaxError",
+            "TypeError",
+            "ReferenceError",
+        }
+    )
+
+
+def _candidate_contract_error(run, analysis, target, previous, content):
+    if is_test_file(target, analysis.get("contract")):
+        return validate_test_candidate(
             run,
-            system_prompt,
-            user_prompt,
-            response_format="json",
-            model_override=model,
-        )
-    except Exception:
-        if model == AGENT_WORKER_MODEL:
-            raise
-        return base_runner._run_model(
-            run,
-            system_prompt,
-            user_prompt,
-            response_format="json",
-            model_override=AGENT_WORKER_MODEL,
+            target,
+            previous,
+            content,
+            analysis.get("contract") or {},
         )
 
+    if target == "package.json":
+        try:
+            old = json.loads(previous or "{}") if str(previous or "").strip() else {}
+            new = json.loads(content or "{}")
+        except Exception as error:
+            return f"package.json repair is not valid JSON: {error}"
+        if not isinstance(new, dict):
+            return "package.json repair must be a JSON object."
+
+        acceptance = get_or_create_acceptance_contract(run)
+        new_scripts = new.get("scripts") if isinstance(new.get("scripts"), dict) else {}
+        new_dependencies = {}
+        for key in ("dependencies", "devDependencies", "peerDependencies"):
+            value = new.get(key)
+            if isinstance(value, dict):
+                new_dependencies.update(value)
+
+        missing = [
+            dep
+            for dep in acceptance.get("required_dependencies") or []
+            if dep not in new_dependencies
+        ]
+        if missing:
+            return "Acceptance guard rejected package.json because required dependencies would be missing: " + ", ".join(missing)
+
+        missing_scripts = [
+            script
+            for script in acceptance.get("required_scripts") or []
+            if script not in new_scripts
+        ]
+        if missing_scripts:
+            return "Acceptance guard rejected package.json because required scripts would be missing: " + ", ".join(missing_scripts)
+        return None
+
+    if not str(target).lower().endswith(_JS_SOURCE_SUFFIXES):
+        return None
+
+    old_info = None
+    for item in analysis.get("contract", {}).get("files") or []:
+        if item.get("filename") == target:
+            old_info = item
+            break
+    if not old_info:
+        # Creating an explicitly required missing file has no old API to protect.
+        return None
+
+    new_info = _analyze_js_file(target, content)
+
+    old_exports = {
+        item.get("symbol")
+        for item in old_info.get("exports") or []
+        if item.get("symbol")
+    }
+    new_exports = {
+        item.get("symbol")
+        for item in new_info.get("exports") or []
+        if item.get("symbol")
+    }
+    missing_exports = sorted(old_exports - new_exports)
+    if missing_exports:
+        return "Contract-regression guard rejected the repair because it removed export(s): " + ", ".join(missing_exports)
+
+    old_functions = set((old_info.get("functions") or {}).keys())
+    new_functions = set((new_info.get("functions") or {}).keys())
+    missing_functions = sorted(old_functions - new_functions)
+    if missing_functions:
+        return "Contract-regression guard rejected the repair because it removed function(s): " + ", ".join(missing_functions)
+
+    old_classes = old_info.get("classes") or {}
+    new_classes = new_info.get("classes") or {}
+    missing_classes = sorted(set(old_classes) - set(new_classes))
+    if missing_classes:
+        return "Contract-regression guard rejected the repair because it removed class(es): " + ", ".join(missing_classes)
+
+    for class_name, class_info in old_classes.items():
+        old_methods = set((class_info.get("methods") or {}).keys())
+        new_methods = set(((new_classes.get(class_name) or {}).get("methods") or {}).keys())
+        missing_methods = sorted(old_methods - new_methods)
+        if missing_methods:
+            return (
+                f"Contract-regression guard rejected the repair because {class_name} "
+                "lost method(s): " + ", ".join(missing_methods)
+            )
+
+    return None
 
 def _preferred_verification(analysis):
     scripts = (
@@ -1690,8 +2047,11 @@ def create_node_debug_plan(run, analysis=None):
         "repair_sequence (array of objects with file, objective, reason), "
         "verification (object with kind plus script or filename), "
         "stop_condition (string).\n\n"
-        "Repair_sequence should normally contain 1-4 EXISTING workspace files. Do not "
-        "include a file unless changing it is necessary. Keep the plan coherent across "
+        "Repair_sequence should normally contain 1-4 workspace files. Targets may be "
+        "existing files or explicitly REQUIRED-MISSING files from the acceptance contract. "
+        "Do not invent unrelated files. A test file is protected specification: include it "
+        "only when deterministic evidence shows the test harness itself is defective or "
+        "the acceptance contract proves required test coverage is missing. Keep the plan coherent across "
         "the whole project rather than repeatedly guessing changes in one file."
     )
 
@@ -1710,29 +2070,66 @@ def create_node_debug_plan(run, analysis=None):
         + _environment_profile_text(run)
     )
 
-    raw, actual_model = _run_planner_model(
-        run,
-        system_prompt,
-        user_prompt,
-        choice["model"],
-    )
-    data = base_runner._safe_json_object(
-        raw,
-        "Node project debug planner",
-    )
-
     existing_files = {
         item["filename"]
         for item in analysis["contract"]["files"]
     }
     existing_files.add("package.json")
+    acceptance_contract = get_or_create_acceptance_contract(run)
+    required_missing_files = {
+        filename
+        for filename in acceptance_contract.get("required_files") or []
+        if filename not in existing_files
+    }
+    allowed_targets = existing_files | required_missing_files
+
+    def _plan_validator(data):
+        sequence = data.get("repair_sequence")
+        if not isinstance(sequence, list):
+            return "repair_sequence must be an array."
+
+        useful = 0
+        for item in sequence[:6]:
+            if not isinstance(item, dict):
+                continue
+            filename = str(item.get("file") or "").strip()
+            if filename not in allowed_targets:
+                continue
+            if is_test_file(filename, analysis["contract"]) and not _test_repair_allowed(
+                filename,
+                analysis,
+            ):
+                continue
+            useful += 1
+
+        if useful <= 0:
+            return (
+                "The plan contains no allowed repair target. Use an existing workspace "
+                "file or an explicitly required missing deliverable, and do not rewrite "
+                "protected tests without deterministic justification."
+            )
+        return None
+
+    data, actual_model = _run_structured_model(
+        run,
+        system_prompt,
+        user_prompt,
+        [choice["model"], AGENT_WORKER_MODEL],
+        "Node project debug planner",
+        validator=_plan_validator,
+    )
 
     repairs = []
     for item in list(data.get("repair_sequence") or [])[:6]:
         if not isinstance(item, dict):
             continue
         filename = str(item.get("file") or "").strip()
-        if filename not in existing_files:
+        if filename not in allowed_targets:
+            continue
+        if is_test_file(filename, analysis["contract"]) and not _test_repair_allowed(
+            filename,
+            analysis,
+        ):
             continue
         repairs.append(
             {
@@ -1798,11 +2195,12 @@ def create_node_debug_plan(run, analysis=None):
             "progress_state": analysis["execution"]["progress_state"],
             "repeated_failure_count": analysis["execution"]["repeated_failure_count"],
             "contract_issue_count": len(analysis["contract"]["issues"]),
+            "acceptance_issue_count": int((analysis.get("acceptance") or {}).get("issue_count") or 0),
             "repair_churn_count": analysis["repair_churn_count"],
         },
     }
 
-    fingerprint = analysis["execution"]["failure"].get("fingerprint")
+    fingerprint = analysis.get("planning_fingerprint")
     trigger = _planner_trigger(analysis)
     timestamp = utc_iso()
 
@@ -1892,6 +2290,8 @@ def create_node_debug_plan(run, analysis=None):
 
 
 def _planner_trigger(analysis):
+    if not (analysis.get("acceptance") or {}).get("satisfied", True):
+        return "node_acceptance_contract"
     if analysis["contract"]["issues"]:
         return "node_project_contract_mismatch"
     if analysis["execution"]["repeated_failure_count"] >= 2:
@@ -1916,6 +2316,15 @@ def format_node_debug_plan(plan):
             or "Not specified"
         ),
     ]
+
+    acceptance_issue_count = int(
+        (data.get("analysis") or {}).get("acceptance_issue_count")
+        or 0
+    )
+    if acceptance_issue_count:
+        lines.append(
+            f"Acceptance requirements still open when planned: {acceptance_issue_count}"
+        )
 
     repairs = list(data.get("repair_sequence") or [])
     if repairs:
@@ -1964,12 +2373,15 @@ def node_project_planner_context(run, analysis=None):
 
 def _repair_prompt_context(run, analysis, plan, repair):
     target = repair["file"]
-    current = read_workspace_file(
-        run["user_id"],
-        run["id"],
-        target,
-        max_chars=PROJECT_FILE_BUDGET,
-    )
+    try:
+        current = read_workspace_file(
+            run["user_id"],
+            run["id"],
+            target,
+            max_chars=PROJECT_FILE_BUDGET,
+        )
+    except Exception:
+        current = "<REQUIRED FILE IS CURRENTLY MISSING; CREATE IT>"
 
     return (
         "USER GOAL:\n"
@@ -2021,114 +2433,121 @@ def execute_node_project_repair(run):
         for item in analysis["contract"]["files"]
     }
     existing.add("package.json")
+    acceptance_contract = get_or_create_acceptance_contract(run)
+    allowed_missing = {
+        filename
+        for filename in acceptance_contract.get("required_files") or []
+        if filename not in existing
+    }
+    allowed_targets = existing | allowed_missing
 
-    if target not in existing:
-        _advance_plan(
-            plan["id"],
-            run["user_id"],
-        )
+    if target not in allowed_targets:
         raise AgentNodeProjectPlannerError(
-            f"Planned Node repair target no longer exists: {target}"
+            f"Planned Node repair target is not an existing or required-missing file: {target}"
         )
+
+    if is_test_file(target, analysis["contract"]) and not _test_repair_allowed(
+        target,
+        analysis,
+    ):
+        raise AgentNodeProjectPlannerError(
+            f"Test-integrity guard blocked an unjustified repair of protected test file: {target}"
+        )
+
+    if target in existing:
+        previous = read_workspace_file(
+            run["user_id"],
+            run["id"],
+            target,
+            max_chars=256000,
+        )
+    else:
+        previous = ""
 
     system_prompt = (
         "You are the Node.js implementation specialist executing ONE approved repair "
         "from a persistent project debug plan. Rewrite exactly the TARGET FILE and no "
         "other file. Return the COMPLETE file content, not a patch. Preserve the user's "
         "architecture and requested npm dependencies. Reconcile imports/exports, APIs, "
-        "callers, test expectations and package contract shown below. Do not weaken or "
-        "delete tests merely to get green. Make the smallest coherent change that "
+        "callers, test expectations, acceptance requirements and package contract shown "
+        "below. Existing public APIs are regression-protected during debugging. Test files "
+        "are protected specification: when a test-harness repair is explicitly approved, "
+        "preserve every existing test name and restore/retain all goal-required coverage; "
+        "never delete tests merely to get green. Make the smallest coherent change that "
         "satisfies this repair objective.\n\n"
-        "Return ONLY JSON with keys: filename, content, summary."
+        "Return ONLY JSON with keys: filename, content, summary. The filename MUST exactly "
+        "match the TARGET FILE."
     )
 
-    # Implementation is normally cheaper than diagnosis. Use the worker model
-    # first even when a reasoning model created the plan; fall back to the plan
-    # model only if the worker cannot produce a valid repair.
-    try:
-        raw, actual_model = base_runner._run_model(
-            run,
-            system_prompt,
-            _repair_prompt_context(
-                run,
-                analysis,
-                plan,
-                repair,
-            ),
-            response_format="json",
-            model_override=AGENT_WORKER_MODEL,
-        )
-        data = base_runner._safe_json_object(
-            raw,
-            "Node project repair specialist",
-        )
-    except Exception:
-        raw, actual_model = base_runner._run_model(
-            run,
-            system_prompt,
-            _repair_prompt_context(
-                run,
-                analysis,
-                plan,
-                repair,
-            ),
-            response_format="json",
-            model_override=plan["planner_model"],
-        )
-        data = base_runner._safe_json_object(
-            raw,
-            "Node project repair specialist",
-        )
-
-    returned_filename = str(data.get("filename") or "").strip()
-    if returned_filename and returned_filename != target:
-        raise AgentNodeProjectPlannerError(
-            f"Repair specialist attempted to change {returned_filename}; expected {target}."
-        )
-
-    content = data.get("content")
-    if content is None:
-        raise AgentNodeProjectPlannerError(
-            "Repair specialist returned no complete file content."
-        )
-
-    previous = read_workspace_file(
-        run["user_id"],
-        run["id"],
-        target,
-        max_chars=256000,
+    context = _repair_prompt_context(
+        run,
+        analysis,
+        plan,
+        repair,
     )
 
-    if str(previous) == str(content):
+    def _repair_validator(data):
+        returned_filename = str(data.get("filename") or "").strip()
+        if returned_filename != target:
+            return (
+                f"filename must be exactly {target}; received "
+                f"{returned_filename or '<empty>'}."
+            )
+        content = data.get("content")
+        if content is None or not isinstance(content, str):
+            return "content must contain the complete target file as a string."
+        return _candidate_contract_error(
+            run,
+            analysis,
+            target,
+            previous,
+            content,
+        )
+
+    data, actual_model = _run_structured_model(
+        run,
+        system_prompt,
+        context,
+        [
+            AGENT_WORKER_MODEL,
+            plan.get("planner_model") or AGENT_WORKER_MODEL,
+            AGENT_WORKER_MODEL,
+        ],
+        "Node project repair specialist",
+        validator=_repair_validator,
+    )
+
+    content = str(data.get("content") or "")
+    if str(previous) == content:
         _advance_plan(
             plan["id"],
             run["user_id"],
         )
         return (
             f"Planner-guided Node repair inspected {target} using {actual_model}, "
-            "but the proposed content was unchanged. Advanced to the next planned repair."
+            "but the validated content was unchanged. Advanced to the next planned repair."
         )
 
     result = write_workspace_file(
         run["user_id"],
         run["id"],
         target,
-        str(content),
+        content,
     )
     _advance_plan(
         plan["id"],
         run["user_id"],
     )
 
+    verb = "created" if target not in existing else "updated"
     return (
-        f"Planner-guided repair updated {result['filename']} ({result['size_bytes']} bytes).\n"
+        f"Planner-guided repair {verb} {result['filename']} ({result['size_bytes']} bytes).\n"
         f"Repair model: {actual_model}\n"
         f"Objective: {repair.get('objective') or repair.get('reason') or 'Repair Node project contract'}\n"
         f"Summary: {str(data.get('summary') or '').strip()}\n"
-        "The deterministic execution loop will re-test the current workspace before "
-        "another speculative repair."
+        "Project/test-integrity guards validated the candidate before the workspace mutation. "
+        "The deterministic execution loop will re-test the current workspace before another repair."
     )[:6500]
-
 
 def _advance_plan(plan_id, user_id):
     conn = get_connection()

@@ -1,5 +1,5 @@
 """
-ATLAS v2.3.1 - Shared Project Intelligence facade.
+ATLAS v2.3.1a - Shared Project Intelligence + Acceptance facade.
 
 The execution controller should not care whether a project is Python, Node,
 TypeScript, or a future language/runtime. It asks this layer for project state,
@@ -13,6 +13,10 @@ from app.services.agent_runtime import (
 )
 from app.services import agent_project_planner as python_planner
 from app.services import agent_node_project_planner as node_planner
+from app.services.agent_acceptance_contract import (
+    acceptance_summary,
+    evaluate_acceptance_contract,
+)
 
 
 def _is_node(run):
@@ -166,4 +170,22 @@ def structured_planner_exhausted_for_current_failure(
     return python_planner.structured_planner_exhausted_for_current_failure(
         run,
         analysis,
+    )
+
+
+def acceptance_state(run, analysis=None):
+    analysis = analysis or analyze_project_state(run)
+    existing = analysis.get("acceptance")
+    if existing is not None:
+        return existing
+    return evaluate_acceptance_contract(
+        run,
+        analysis.get("contract") or {},
+        sandbox_verified=None,
+    )
+
+
+def acceptance_context(run, analysis=None):
+    return acceptance_summary(
+        acceptance_state(run, analysis)
     )

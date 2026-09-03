@@ -1,5 +1,5 @@
 """
-ATLAS v2.3.1 - Project Intelligence execution integration.
+ATLAS v2.3.1a - Project Intelligence + Acceptance execution integration.
 
 This module composes the stable multi-runtime execution runner with the shared
 Project Intelligence facade. The legacy runner remains the hardened sandbox/
@@ -13,6 +13,7 @@ been validated in production.
 """
 
 from app.services import agent_execution_runner as runtime_runner
+from app.services.agent_acceptance_contract import acceptance_summary
 from app.services.agent_environment import (
     dependency_manifest_needs_update,
     environment_needs_setup,
@@ -50,6 +51,8 @@ _ORIGINAL_PLAN_NEXT_ACTION = runtime_runner._plan_next_action
 _ORIGINAL_EXECUTE_PROJECT_PLAN = runtime_runner._execute_project_plan
 _ORIGINAL_EXECUTE_PROJECT_REPAIR = runtime_runner._execute_project_repair
 _ORIGINAL_PROJECT_CONTEXT = runtime_runner._project_context
+_ORIGINAL_SANDBOX_FORCED_FINAL = runtime_runner._sandbox_forced_final
+_ORIGINAL_LATEST_EXECUTION_STATE = runtime_runner._latest_execution_state
 
 
 def _available_actions(run):
@@ -204,19 +207,14 @@ def _node_project_action(run):
         "latest"
     )
 
-    if (
+    execution_verified = bool(
         latest
-        and str(
-            latest.get("status")
-            or ""
-        )
-        == "success"
-        and int(
-            latest.get("exit_code")
-            or 0
-        )
-        == 0
-    ):
+        and str(latest.get("status") or "") == "success"
+        and int(latest.get("exit_code") or 0) == 0
+    )
+    acceptance = analysis.get("acceptance") or {}
+
+    if execution_verified and acceptance.get("satisfied", True):
         mark_active_plan_resolved(
             run["user_id"],
             run["id"],
@@ -227,13 +225,7 @@ def _node_project_action(run):
         run["user_id"],
         run["id"],
     )
-    current_failure_fingerprint = (
-        execution[
-            "failure"
-        ].get(
-            "fingerprint"
-        )
-    )
+    current_failure_fingerprint = analysis.get("planning_fingerprint")
 
     if (
         active_plan
@@ -343,8 +335,8 @@ def _node_project_action(run):
             "action": "project_plan",
             "reason": (
                 "Build a persistent Node/JavaScript project contract and recovery "
-                "plan from current source, test expectations, package.json, and "
-                "the actual sandbox failure before another code mutation."
+                "plan from current source, test expectations, package.json, the goal-level "
+                "acceptance contract, and actual sandbox evidence before another mutation."
             ),
             "model": "adaptive",
         }
@@ -371,6 +363,46 @@ def _node_project_action(run):
     return None
 
 
+
+def _sandbox_forced_final(run):
+    """
+    Goal-level acceptance is independent of sandbox success.
+
+    This gate prevents a passing but incomplete workspace (for example, missing
+    index.js or missing required tests) from being labeled VERIFIED when a step
+    budget or controller finalization occurs before another planning cycle.
+    """
+    if effective_runtime(run) == RUNTIME_NODE:
+        try:
+            state = _ORIGINAL_LATEST_EXECUTION_STATE(run)
+            if state.get("verified"):
+                analysis = analyze_project_state(run)
+                acceptance = analysis.get("acceptance") or {}
+                if not acceptance.get("satisfied", True):
+                    answer = (
+                        "NOT VERIFIED — The latest sandbox validation passed, but the "
+                        "goal-level acceptance contract is still incomplete. A green "
+                        "test result cannot override missing requested deliverables or "
+                        "coverage.\n\n"
+                        + acceptance_summary(acceptance)
+                        + "\n\nUse Continue / Revise to continue the same workspace and satisfy the remaining acceptance requirements."
+                    )
+                    return runtime_runner.base_runner._finish_with_final(
+                        run,
+                        {
+                            "answer": answer,
+                            "evidence": [],
+                            "artifacts": [],
+                        },
+                    )
+        except Exception:
+            # Acceptance must never hide a real sandbox result because its own
+            # static evaluator had an unexpected defect. Fall through to the
+            # hardened sandbox finalizer.
+            pass
+
+    return _ORIGINAL_SANDBOX_FORCED_FINAL(run)
+
 def _plan_next_action(run):
     if (
         effective_runtime(run)
@@ -395,6 +427,7 @@ runtime_runner._project_context = _project_context
 runtime_runner._execute_project_plan = _execute_project_plan
 runtime_runner._execute_project_repair = _execute_project_repair
 runtime_runner._plan_next_action = _plan_next_action
+runtime_runner._sandbox_forced_final = _sandbox_forced_final
 runtime_runner.project_planner_context = project_planner_context
 
 

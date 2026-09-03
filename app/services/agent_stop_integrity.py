@@ -362,6 +362,17 @@ def _infer_completed_stop(run, steps):
             "details": {"steps_remaining": remaining},
         }
 
+    if "bounded project transaction budget is exhausted" in reason:
+        return {
+            "code": "project_transaction_exhausted",
+            "category": "planner",
+            "message": (
+                "The bounded project transaction budget was exhausted for the current revision."
+            ),
+            "step_index": last.get("step_index"),
+            "details": {"steps_remaining": remaining},
+        }
+
     if "structured planner already attempted multiple recovery plans" in reason:
         return {
             "code": "planner_exhausted",
@@ -403,6 +414,12 @@ def _termination_sentence(stop):
             "ATLAS stopped this execution cycle because the controller could not produce "
             "a valid next workspace/runtime action after re-planning."
             + suffix
+        )
+
+    if code == "project_transaction_exhausted":
+        return (
+            "ATLAS stopped this execution cycle because the bounded project transaction "
+            "budget was exhausted for the current revision instead of continuing a repair loop."
         )
 
     if code == "planner_exhausted":

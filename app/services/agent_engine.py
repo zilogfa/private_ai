@@ -1,6 +1,6 @@
 import threading
 
-from app.services.agent_execution_v231 import execute_agent_run
+from app.services.agent_execution_v241 import execute_agent_run
 from app.services.agents import get_agent_run, mark_agent_running
 from app.services.agent_stop_integrity import (
     REPEATED_INTERNAL_FAILURE_THRESHOLD,
@@ -87,6 +87,17 @@ def agent_engine_status():
         "sandboxed_python_execution": True,
         "control_plane_stop_integrity": True,
         "repeated_internal_failure_threshold": REPEATED_INTERNAL_FAILURE_THRESHOLD,
-        "project_intelligence": "v2.3.1",
+        "project_intelligence": "v2.4.2",
         "node_deterministic_debug_planner": True,
+        "bounded_project_transactions": True,
+        "transactional_multi_file_repairs": True,
+        "bounded_model_wall_clock": True,
+        "evidence_driven_recovery": True,
+        "transaction_progress_scoring": True,
+        "repeated_hypothesis_guard": True,
+        "deterministic_test_harness_repair": True,
+        "deterministic_verified_finalization": True,
+        "goal_acceptance_contract": True,
+        "test_integrity_guard": True,
+        "structured_output_internal_retry": True,
     }
