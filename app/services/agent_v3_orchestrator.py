@@ -45,7 +45,8 @@ from app.services.agent_v3_node_adapter import (
     repair_project,
     verify_project,
 )
-from app.services.agent_v3_spec import build_project_spec, spec_summary
+from app.services.agent_v3_model_gateway import V3ModelError
+from app.services.agent_v3_spec import build_project_spec, spec_summary, upgrade_project_spec
 from app.services.agent_v3_repair_governor import (
     ABSOLUTE_MAX_COMMITTED_REPAIRS,
     BASE_REPAIR_TRANCHE,
@@ -57,10 +58,12 @@ from app.services.agent_v3_execution_governor import maybe_grant_tail_budget
 from app.services.agent_v3_revision_governance import close_open_revision_for_terminal_run
 from app.services.agent_v3_storage import (
     CORE_VERSION,
+    demonstration_status,
     ensure_v3_run,
     get_v3_run,
     list_repair_outcomes,
     record_acceptance_evaluation,
+    record_demonstration_event,
     record_phase_event,
     record_repair_outcome,
     update_v3_run,
@@ -171,13 +174,8 @@ def _latest_node_execution(run):
     return node[-1] if node else None
 
 
-def _committed_repair_count(run):
-    """Count only repair steps that actually committed a validated change-set.
-
-    v3.0.x incremented its repair counter before candidate validation, so a
-    rejected model candidate could consume budget.  Deriving from completed
-    repair steps repairs that historical accounting on resume.
-    """
+def _lifetime_committed_repair_count(run):
+    """Count durable repair mutations across the full run history."""
     count = 0
     for step in list_agent_steps(run["user_id"], run["id"]):
         if str(step.get("action") or "") != "repair":
@@ -190,15 +188,52 @@ def _committed_repair_count(run):
     return count
 
 
-def _repair_outcomes_with_legacy_seed(run):
-    outcomes = list_repair_outcomes(run["user_id"], run["id"], limit=100)
+def _repair_campaign_key(run, spec, execution, acceptance=None):
+    """Return the bounded engineering campaign that owns the next repair.
+
+    Baseline repair, controlled-demonstration repair, and final acceptance
+    remediation are distinct failure domains.  Repair budget from one campaign
+    must never silently exhaust another campaign.
+    """
+    demo = demonstration_status(run["user_id"], run["id"])
+    if (
+        spec.get("requires_fail_then_repair")
+        and demo.get("failure_observed")
+        and not demo.get("repair_verified")
+        and not execution_passed(execution)
+    ):
+        return "demonstration"
+    if execution_passed(execution) and acceptance and (acceptance.get("repairable_issues") or []):
+        return "acceptance"
+    return "baseline"
+
+
+def _campaign_repair_state(run, campaign_key):
+    outcomes = list_repair_outcomes(
+        run["user_id"],
+        run["id"],
+        limit=300,
+        campaign_key=campaign_key,
+    )
+    committed = max(
+        [int(item.get("campaign_repair_number") or 0) for item in outcomes] or [0]
+    )
+    return committed, outcomes
+
+
+def _repair_outcomes_with_legacy_seed(run, campaign_key="baseline"):
+    outcomes = list_repair_outcomes(
+        run["user_id"], run["id"], limit=300, campaign_key=campaign_key
+    )
     if outcomes:
         return outcomes
 
-    # Upgrade path for v3.0.x runs: when no v3.1 outcome rows exist yet, use
-    # the latest two authoritative Node executions as a one-item progress seed.
-    # This lets a run that was clearly improving continue instead of being
-    # blocked merely because it predates the new governor table.
+    # Historical v3.0.x repair history belongs only to the baseline campaign.
+    # A new controlled-defect campaign must start clean even when the baseline
+    # needed several repairs.
+    if str(campaign_key) != "baseline":
+        return []
+
     executions = [
         item
         for item in list_agent_sandbox_executions(run["user_id"], run["id"], limit=100)
@@ -211,7 +246,9 @@ def _repair_outcomes_with_legacy_seed(run):
             "score_delta": progress.get("score_delta"),
             "before": progress.get("before"),
             "after": progress.get("after"),
-            "detail": "Derived from pre-v3.1 sandbox execution history.",
+            "detail": "Derived from pre-v3.1 baseline sandbox execution history.",
+            "campaign_key": "baseline",
+            "campaign_repair_number": 0,
         }]
     return []
 
@@ -312,7 +349,16 @@ def execute_v3_agent_run(user_id, run_id):
                 return
             spec = holder["spec"]
         else:
-            spec = dict(spec)
+            original_spec = dict(spec)
+            spec = upgrade_project_spec(_fresh_run(run), original_spec, "node")
+            if spec != original_spec:
+                update_v3_run(_fresh_run(run), spec=spec, phase="project_spec")
+                record_phase_event(
+                    _fresh_run(run),
+                    "project_spec",
+                    "schema_upgraded",
+                    "Persistent project contract reconciled deterministically from original-goal provenance; revision/model-owned hard requirements were removed without a model call.",
+                )
 
         # -------------------------- BUILD ---------------------------
         run = _fresh_run(run)
@@ -347,14 +393,26 @@ def execute_v3_agent_run(user_id, run_id):
         holder = {}
 
         def do_environment(_step):
-            holder["env"] = ensure_environment(_fresh_run(run))
+            holder["env"] = ensure_environment(_fresh_run(run), spec)
             status = holder["env"].get("status") or {}
+            resolutions = list(holder["env"].get("dependency_resolutions") or [])
+            resolution_lines = []
+            for item in resolutions:
+                if str(item.get("status") or "") == "registry_recovered":
+                    resolution_lines.append(
+                        f"Registry recovery: {item.get('package')} {item.get('requested_spec')} → {item.get('effective_spec')}"
+                    )
+                elif str(item.get("status") or "") == "user_constraint_enforced":
+                    resolution_lines.append(
+                        f"User dependency constraint enforced: {item.get('package')}@{item.get('effective_spec')}"
+                    )
             return {
                 "output": (
                     "Node project environment ready.\n"
                     f"Setup performed: {'yes' if holder['env'].get('setup') else 'no/cache or base ready'}.\n"
                     f"Status: {status.get('status') or 'ready'}.\n"
                     f"Image: {status.get('execution_image') or status.get('image_tag') or 'base Node image'}."
+                    + (("\n" + "\n".join(resolution_lines)) if resolution_lines else "")
                 )
             }
 
@@ -389,61 +447,15 @@ def execute_v3_agent_run(user_id, run_id):
             return
         execution = verification["execution"]
 
-        # If the user explicitly requested fail→repair demonstration and the
-        # first project unexpectedly passed, create exactly one controlled
-        # implementation defect then observe the requested real failure.
-        if spec.get("requires_fail_then_repair"):
-            executions = list_agent_sandbox_executions(user_id, run_id, limit=100)
-            had_failure = any(
-                str(item.get("runtime") or "").lower() == "node"
-                and str(item.get("status") or "") in {"failed", "timeout"}
-                for item in executions
-            )
-            if execution_passed(execution) and not had_failure:
-                defect_holder = {}
-
-                def do_defect(_step):
-                    defect_holder["result"] = inject_intentional_defect(_fresh_run(run), spec)
-                    return {
-                        "output": (
-                            "User-requested controlled fail→repair demonstration prepared.\n"
-                            "Changed file: "
-                            + ", ".join(item.get("filename") for item in defect_holder["result"].get("changed") or [])
-                        )
-                    }
-
-                result = _phase(
-                    run,
-                    "intentional_defect",
-                    "The goal explicitly requires one legitimate failing verification before repair; introduce one controlled implementation-only defect.",
-                    do_defect,
-                    action="intentional_defect",
-                )
-                if result.get("paused"):
-                    return
-
-                verification = {}
-                result = _phase(
-                    run,
-                    "verify",
-                    "Record the user-requested real sandbox failure before repair.",
-                    do_verify,
-                    action="verify",
-                    tool_name="docker/node",
-                )
-                if result.get("paused"):
-                    return
-                execution = verification["execution"]
-                if execution_passed(execution):
-                    raise V3OrchestratorError(
-                        "The goal required a real fail→repair demonstration, but the controlled defect did not produce a failing sandbox verification."
-                    )
+        # Deliberate fail→repair demonstrations are owned by the lifecycle, not
+        # by BUILD. The baseline must first become green through ordinary repair.
 
         # ---------------------- REPAIR / ACCEPT ---------------------
         acceptance = None
-        committed_repairs = _committed_repair_count(_fresh_run(run))
-        # Normalize the old v3.0.x counter to committed workspace mutations.
-        update_v3_run(_fresh_run(run), repair_cycle=committed_repairs)
+        lifetime_committed_repairs = _lifetime_committed_repair_count(_fresh_run(run))
+        # v3_run.repair_cycle remains a lifetime telemetry counter.  Repair
+        # permission itself is campaign-scoped below.
+        update_v3_run(_fresh_run(run), repair_cycle=lifetime_committed_repairs)
 
         while True:
             run = _fresh_run(run)
@@ -451,6 +463,107 @@ def execute_v3_agent_run(user_id, run_id):
                 raise V3OrchestratorError(
                     "ATLAS v3 runtime budget was reached. Resume the same run to continue from its stored spec/workspace/evidence."
                 )
+
+            if spec.get("requires_fail_then_repair") and not execution_passed(execution):
+                demo = demonstration_status(user_id, run_id)
+                if demo.get("defect_injected") and not demo.get("failure_observed"):
+                    # Resume-safe provenance: if ATLAS restarted after injecting
+                    # the controlled defect, the next authoritative failing
+                    # verification still completes the demonstration evidence.
+                    record_demonstration_event(
+                        _fresh_run(run),
+                        "failure_observed",
+                        detail="Controlled defect produced an authoritative failing Node verification.",
+                        execution_status=str(execution.get("status") or "failed"),
+                    )
+
+            if execution_passed(execution) and spec.get("requires_fail_then_repair"):
+                demo = demonstration_status(user_id, run_id)
+                if not demo.get("defect_injected"):
+                    # A green execution here is the intended-correct baseline.
+                    # Only now may ATLAS perform the user's explicit controlled
+                    # fail→repair demonstration. Ordinary bootstrap/repair
+                    # failures never count as that requested demonstration.
+                    if not demo.get("baseline_verified"):
+                        record_demonstration_event(
+                            _fresh_run(run),
+                            "baseline_verified",
+                            detail="Authoritative Node verification passed before controlled defect injection.",
+                            execution_status="success",
+                        )
+                    defect_holder = {}
+
+                    def do_defect(_step):
+                        defect_holder["result"] = inject_intentional_defect(
+                            _fresh_run(run),
+                            spec,
+                            baseline_execution=execution,
+                        )
+                        changed = defect_holder["result"].get("changed") or []
+                        record_demonstration_event(
+                            _fresh_run(run),
+                            "defect_injected",
+                            detail="Controlled implementation-only defect: "
+                            + ", ".join(item.get("filename") for item in changed),
+                        )
+                        preflight = defect_holder["result"].get("preflight") or {}
+                        preflight_execution = preflight.get("execution") or {}
+                        return {
+                            "output": (
+                                "Baseline verification passed. User-requested controlled fail→repair demonstration prepared.\n"
+                                f"Injection lane: {defect_holder['result'].get('lane') or 'unknown'}\n"
+                                f"Mutation operator: {defect_holder['result'].get('operator') or 'unknown'}\n"
+                                f"Staged proof: {preflight_execution.get('status') or 'unknown'}"
+                                + (f" · exit code {preflight_execution.get('exit_code')}" if preflight_execution.get("exit_code") is not None else "")
+                                + "\nChanged file: " + ", ".join(item.get("filename") for item in changed)
+                            )
+                        }
+
+                    result = _phase(
+                        run,
+                        "intentional_defect",
+                        "A clean baseline is now proven. Introduce exactly one controlled implementation-only defect for the user's requested fail→repair demonstration.",
+                        do_defect,
+                        action="intentional_defect",
+                    )
+                    if result.get("paused"):
+                        return
+
+                    verification = {}
+                    result = _phase(
+                        run,
+                        "verify",
+                        "Observe the controlled defect as a real authoritative sandbox failure before allowing repair.",
+                        do_verify,
+                        action="verify",
+                        tool_name="docker/node",
+                    )
+                    if result.get("paused"):
+                        return
+                    execution = verification["execution"]
+                    if execution_passed(execution):
+                        raise V3OrchestratorError(
+                            "The controlled demonstration defect did not produce a failing authoritative verification. "
+                            "ATLAS stopped rather than falsely claiming the required fail→repair evidence."
+                        )
+                    record_demonstration_event(
+                        _fresh_run(run),
+                        "failure_observed",
+                        detail="Controlled defect produced an authoritative failing Node verification.",
+                        execution_status=str(execution.get("status") or "failed"),
+                    )
+                    acceptance = None
+                    # Continue into the ordinary evidence-driven repair governor.
+
+                elif demo.get("failure_observed") and not demo.get("repair_verified"):
+                    # Reaching a green execution after the controlled failure
+                    # proves the demonstration repair cycle completed.
+                    record_demonstration_event(
+                        _fresh_run(run),
+                        "repair_verified",
+                        detail="Authoritative verification passed after repair of the controlled defect.",
+                        execution_status="success",
+                    )
 
             if execution_passed(execution):
                 acceptance_holder = {}
@@ -501,41 +614,62 @@ def execute_v3_agent_run(user_id, run_id):
                         + acceptance_summary(acceptance)
                     )
 
-            outcomes = _repair_outcomes_with_legacy_seed(run)
-            permission = repair_permission(committed_repairs, outcomes)
+            campaign_key = _repair_campaign_key(run, spec, execution, acceptance)
+            campaign_committed, campaign_outcomes = _campaign_repair_state(run, campaign_key)
+            outcomes = campaign_outcomes or _repair_outcomes_with_legacy_seed(run, campaign_key)
+            permission = repair_permission(campaign_committed, outcomes)
             if not permission.get("allowed"):
                 issue_text = acceptance_summary(acceptance) if acceptance else "Latest sandbox verification is still failing."
                 raise V3OrchestratorError(
                     "ATLAS v3 repair governor stopped this execution safely. "
+                    f"Repair campaign '{campaign_key}' stopped: "
                     + str(permission.get("reason") or "No further bounded repair was authorized.")
                     + " "
                     + issue_text
                 )
 
-            next_repair = committed_repairs + 1
+            lifetime_committed_repairs = _lifetime_committed_repair_count(_fresh_run(run))
+            next_lifetime_repair = lifetime_committed_repairs + 1
+            next_campaign_repair = campaign_committed + 1
             repair_holder = {}
             issues = []
             if acceptance:
                 issues = list(acceptance.get("repairable_issues") or [])
 
             before_execution = execution
+            record_phase_event(
+                _fresh_run(run),
+                "repair_campaign",
+                "authorized",
+                (
+                    f"Campaign={campaign_key}; campaign repair={next_campaign_repair}; "
+                    f"lifetime repair={next_lifetime_repair}; governor lane={permission.get('lane')}."
+                ),
+            )
 
             def do_repair(_step):
                 repair_holder["result"] = repair_project(
                     _fresh_run(run),
                     spec,
                     before_execution,
-                    next_repair,
+                    next_campaign_repair,
                     acceptance_issues=issues,
                     repair_history=outcomes,
                 )
                 changed = repair_holder["result"].get("changed") or []
                 preflight = repair_holder["result"].get("preflight") or {}
                 preflight_exec = preflight.get("execution") or {}
+                authority = repair_holder["result"].get("test_repair_authority") or []
+                authority_text = ", ".join(
+                    f"{item.get('filename')}:{item.get('scope')}[{','.join(item.get('kinds') or [])}]"
+                    for item in authority
+                ) or "none"
                 return {
                     "output": (
-                        f"Committed repair {next_repair}.\n"
+                        f"Committed repair {next_lifetime_repair} (campaign {campaign_key} {next_campaign_repair}).\n"
                         f"Governor lane: {permission.get('lane')}.\n"
+                        f"Repair lane: {repair_holder['result'].get('lane') or 'model_reasoning'}\n"
+                        f"Test repair authority: {authority_text}\n"
                         f"Model: {repair_holder['result'].get('model')}\n"
                         f"Hypothesis: {repair_holder['result'].get('hypothesis') or 'not supplied'}\n"
                         f"Staged candidate preflight: {preflight_exec.get('status') or 'structural-only'}"
@@ -548,8 +682,8 @@ def execute_v3_agent_run(user_id, run_id):
                 run,
                 "repair",
                 (
-                    f"Apply evidence-driven committed repair {next_repair}. "
-                    f"Base tranche: {BASE_REPAIR_TRANCHE}; absolute safety ceiling: {ABSOLUTE_MAX_COMMITTED_REPAIRS}. "
+                    f"Apply evidence-driven repair campaign '{campaign_key}' slot {next_campaign_repair}. "
+                    f"Campaign base tranche: {BASE_REPAIR_TRANCHE}; campaign absolute safety ceiling: {ABSOLUTE_MAX_COMMITTED_REPAIRS}. "
                     "Rejected model candidates are internal retries and do not consume committed-repair budget."
                 ),
                 do_repair,
@@ -560,12 +694,13 @@ def execute_v3_agent_run(user_id, run_id):
 
             # Only a successfully committed validated change-set consumes the
             # engineering repair budget.
-            committed_repairs = next_repair
+            lifetime_committed_repairs = next_lifetime_repair
+            campaign_committed = next_campaign_repair
             update_v3_run(
                 _fresh_run(run),
                 status="running",
                 phase="repair",
-                repair_cycle=committed_repairs,
+                repair_cycle=lifetime_committed_repairs,
                 latest_failure_fingerprint=failure_fingerprint(before_execution),
             )
 
@@ -589,7 +724,7 @@ def execute_v3_agent_run(user_id, run_id):
             result = _phase(
                 run,
                 "verify",
-                f"Authoritatively verify the workspace after committed repair {committed_repairs}.",
+                f"Authoritatively verify the workspace after {campaign_key} campaign repair {campaign_committed}.",
                 do_verify,
                 action="verify",
                 tool_name="docker/node",
@@ -602,7 +737,9 @@ def execute_v3_agent_run(user_id, run_id):
             progress = compare_evidence(before_execution, execution)
             record_repair_outcome(
                 _fresh_run(run),
-                repair_number=committed_repairs,
+                repair_number=lifetime_committed_repairs,
+                campaign_key=campaign_key,
+                campaign_repair_number=campaign_committed,
                 model=repair_holder["result"].get("model"),
                 hypothesis=repair_holder["result"].get("hypothesis"),
                 changed_files=[
@@ -635,6 +772,6 @@ def execute_v3_agent_run(user_id, run_id):
             )
         except Exception:
             pass
-    except (V3NodeError, V3OrchestratorError, AgentSandboxError, AgentEnvironmentError, AgentStoreError) as error:
+    except (V3NodeError, V3OrchestratorError, V3ModelError, AgentSandboxError, AgentEnvironmentError, AgentStoreError) as error:
         _not_verified_failure(_fresh_run(run), str(error))
         return

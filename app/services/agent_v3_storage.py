@@ -11,7 +11,7 @@ import threading
 from app.database import get_connection
 from app.services.agents import utc_iso
 
-CORE_VERSION = "3.4.0"
+CORE_VERSION = "3.10.0"
 _STORAGE_READY = False
 _STORAGE_LOCK = threading.Lock()
 
@@ -112,6 +112,33 @@ def initialize_v3_storage():
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS agent_v3_protocol_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                phase TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                model TEXT,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                schema_name TEXT,
+                raw_output_chars INTEGER NOT NULL DEFAULT 0,
+                raw_preview TEXT,
+                detail TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_v3_protocol_events_run
+            ON agent_v3_protocol_events(run_id, id)
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS agent_v3_repair_outcomes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
@@ -137,6 +164,40 @@ def initialize_v3_storage():
             """
             CREATE INDEX IF NOT EXISTS idx_agent_v3_repair_outcomes_run
             ON agent_v3_repair_outcomes(run_id, id)
+            """
+        )
+        # v3.9: repair outcomes are scoped to lifecycle campaigns.  Existing
+        # rows predate campaigns and belong to the baseline campaign.
+        cur.execute("PRAGMA table_info(agent_v3_repair_outcomes)")
+        repair_columns = {str(row[1]) for row in cur.fetchall()}
+        if "campaign_key" not in repair_columns:
+            cur.execute(
+                "ALTER TABLE agent_v3_repair_outcomes "
+                "ADD COLUMN campaign_key TEXT NOT NULL DEFAULT 'baseline'"
+            )
+        if "campaign_repair_number" not in repair_columns:
+            cur.execute(
+                "ALTER TABLE agent_v3_repair_outcomes "
+                "ADD COLUMN campaign_repair_number INTEGER NOT NULL DEFAULT 0"
+            )
+        cur.execute(
+            """
+            UPDATE agent_v3_repair_outcomes
+            SET campaign_key = 'baseline'
+            WHERE campaign_key IS NULL OR TRIM(campaign_key) = ''
+            """
+        )
+        cur.execute(
+            """
+            UPDATE agent_v3_repair_outcomes
+            SET campaign_repair_number = repair_number
+            WHERE campaign_repair_number IS NULL OR campaign_repair_number <= 0
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_v3_repair_outcomes_campaign
+            ON agent_v3_repair_outcomes(run_id, campaign_key, id)
             """
         )
         cur.execute(
@@ -216,6 +277,51 @@ def initialize_v3_storage():
             """
             CREATE INDEX IF NOT EXISTS idx_agent_v3_acceptance_evaluations_run
             ON agent_v3_acceptance_evaluations(run_id, id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_v3_dependency_resolutions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                package_name TEXT NOT NULL,
+                requested_spec TEXT,
+                effective_spec TEXT,
+                provenance TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_v3_dependency_resolutions_run
+            ON agent_v3_dependency_resolutions(run_id, id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_v3_demonstration_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                detail TEXT,
+                execution_status TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_v3_demonstration_events_run
+            ON agent_v3_demonstration_events(run_id, id)
             """
         )
         conn.commit()
@@ -425,6 +531,62 @@ def list_model_calls(user_id, run_id, limit=50):
     ]
 
 
+def record_protocol_event(
+    run,
+    *,
+    phase,
+    purpose,
+    model=None,
+    event_type,
+    status,
+    schema_name=None,
+    raw_output_chars=0,
+    raw_preview=None,
+    detail=None,
+):
+    initialize_v3_storage()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO agent_v3_protocol_events (
+            run_id, user_id, phase, purpose, model, event_type, status,
+            schema_name, raw_output_chars, raw_preview, detail, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(run["id"]), int(run["user_id"]), str(phase)[:80],
+            str(purpose)[:120], str(model or "")[:255] or None,
+            str(event_type)[:80], str(status)[:40],
+            str(schema_name or "")[:120] or None, int(raw_output_chars or 0),
+            str(raw_preview or "")[:5000] or None, str(detail or "")[:4000] or None,
+            utc_iso(),
+        ),
+    )
+    conn.commit(); conn.close()
+
+
+def list_protocol_events(user_id, run_id, limit=100):
+    initialize_v3_storage()
+    conn = get_connection(); cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT phase, purpose, model, event_type, status, schema_name,
+               raw_output_chars, raw_preview, detail, created_at
+        FROM agent_v3_protocol_events
+        WHERE run_id = ? AND user_id = ?
+        ORDER BY id ASC LIMIT ?
+        """,
+        (str(run_id), int(user_id), max(1, min(300, int(limit)))),
+    )
+    rows = cur.fetchall(); conn.close()
+    return [{
+        "phase": r[0], "purpose": r[1], "model": r[2], "event_type": r[3],
+        "status": r[4], "schema_name": r[5], "raw_output_chars": int(r[6] or 0),
+        "raw_preview": r[7], "detail": r[8], "created_at": r[9],
+    } for r in rows]
+
+
 def list_phase_events(user_id, run_id, limit=200):
     initialize_v3_storage()
     conn = get_connection()
@@ -460,11 +622,15 @@ def record_repair_outcome(
     hypothesis=None,
     changed_files=None,
     progress=None,
+    campaign_key="baseline",
+    campaign_repair_number=None,
 ):
     initialize_v3_storage()
     progress = dict(progress or {})
     before = dict(progress.get("before") or {})
     after = dict(progress.get("after") or {})
+    campaign = str(campaign_key or "baseline").strip().lower() or "baseline"
+    campaign_number = int(campaign_repair_number or repair_number or 0)
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -473,8 +639,9 @@ def record_repair_outcome(
             run_id, user_id, repair_number, model, hypothesis,
             changed_files_json, before_fingerprint, after_fingerprint,
             progress_class, score_delta, before_evidence_json,
-            after_evidence_json, detail, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            after_evidence_json, detail, created_at, campaign_key,
+            campaign_repair_number
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(run["id"]),
@@ -491,13 +658,15 @@ def record_repair_outcome(
             json.dumps(after, ensure_ascii=False, sort_keys=True, default=str),
             str(progress.get("reason") or "")[:4000] or None,
             utc_iso(),
+            campaign[:80],
+            campaign_number,
         ),
     )
     conn.commit()
     conn.close()
 
 
-def list_repair_outcomes(user_id, run_id, limit=100):
+def list_repair_outcomes(user_id, run_id, limit=100, campaign_key=None):
     initialize_v3_storage()
     conn = get_connection()
     cur = conn.cursor()
@@ -506,7 +675,7 @@ def list_repair_outcomes(user_id, run_id, limit=100):
         SELECT repair_number, model, hypothesis, changed_files_json,
                before_fingerprint, after_fingerprint, progress_class,
                score_delta, before_evidence_json, after_evidence_json,
-               detail, created_at
+               detail, created_at, campaign_key, campaign_repair_number
         FROM agent_v3_repair_outcomes
         WHERE run_id = ? AND user_id = ?
         ORDER BY id ASC LIMIT ?
@@ -516,7 +685,11 @@ def list_repair_outcomes(user_id, run_id, limit=100):
     rows = cur.fetchall()
     conn.close()
     result = []
+    requested_campaign = (str(campaign_key).strip().lower() if campaign_key is not None else None)
     for row in rows:
+        campaign = str(row[12] or "baseline").strip().lower() or "baseline"
+        if requested_campaign is not None and campaign != requested_campaign:
+            continue
         result.append({
             "repair_number": int(row[0] or 0),
             "model": row[1],
@@ -530,6 +703,8 @@ def list_repair_outcomes(user_id, run_id, limit=100):
             "after": _loads(row[9], {}),
             "detail": row[10],
             "created_at": row[11],
+            "campaign_key": campaign,
+            "campaign_repair_number": int(row[13] or row[0] or 0),
         })
     return result
 
@@ -687,6 +862,103 @@ def list_acceptance_evaluations(user_id, run_id, limit=100):
     } for r in rows]
 
 
+def record_dependency_resolutions(run, resolutions):
+    initialize_v3_storage()
+    items = [dict(item) for item in (resolutions or []) if isinstance(item, dict)]
+    if not items:
+        return
+    conn = get_connection(); cur = conn.cursor()
+    for item in items:
+        cur.execute(
+            """
+            INSERT INTO agent_v3_dependency_resolutions (
+                run_id, user_id, package_name, requested_spec, effective_spec,
+                provenance, status, detail, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(run["id"]), int(run["user_id"]),
+                str(item.get("package") or "")[:255],
+                str(item.get("requested_spec") or "")[:255] or None,
+                str(item.get("effective_spec") or "")[:255] or None,
+                str(item.get("provenance") or "unknown")[:80],
+                str(item.get("status") or "unknown")[:80],
+                str(item.get("detail") or "")[:3000] or None,
+                utc_iso(),
+            ),
+        )
+    conn.commit(); conn.close()
+
+
+def list_dependency_resolutions(user_id, run_id, limit=200):
+    initialize_v3_storage()
+    conn = get_connection(); cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT package_name, requested_spec, effective_spec, provenance, status, detail, created_at
+        FROM agent_v3_dependency_resolutions
+        WHERE run_id = ? AND user_id = ?
+        ORDER BY id ASC LIMIT ?
+        """,
+        (str(run_id), int(user_id), max(1, min(500, int(limit)))),
+    )
+    rows = cur.fetchall(); conn.close()
+    return [{
+        "package": row[0], "requested_spec": row[1], "effective_spec": row[2],
+        "provenance": row[3], "status": row[4], "detail": row[5], "created_at": row[6],
+    } for row in rows]
+
+
+def record_demonstration_event(run, event_type, *, detail=None, execution_status=None):
+    initialize_v3_storage()
+    conn = get_connection(); cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO agent_v3_demonstration_events (
+            run_id, user_id, event_type, detail, execution_status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(run["id"]), int(run["user_id"]), str(event_type)[:80],
+            str(detail or "")[:3000] or None,
+            str(execution_status or "")[:80] or None,
+            utc_iso(),
+        ),
+    )
+    conn.commit(); conn.close()
+
+
+def list_demonstration_events(user_id, run_id, limit=100):
+    initialize_v3_storage()
+    conn = get_connection(); cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT event_type, detail, execution_status, created_at
+        FROM agent_v3_demonstration_events
+        WHERE run_id = ? AND user_id = ?
+        ORDER BY id ASC LIMIT ?
+        """,
+        (str(run_id), int(user_id), max(1, min(300, int(limit)))),
+    )
+    rows = cur.fetchall(); conn.close()
+    return [{
+        "event_type": row[0], "detail": row[1], "execution_status": row[2], "created_at": row[3],
+    } for row in rows]
+
+
+def demonstration_status(user_id, run_id):
+    events = list_demonstration_events(user_id, run_id, limit=300)
+    types = [str(item.get("event_type") or "") for item in events]
+    return {
+        "baseline_verified": "baseline_verified" in types,
+        "defect_injected": "defect_injected" in types,
+        "failure_observed": "failure_observed" in types,
+        "repair_verified": "repair_verified" in types,
+        "satisfied": all(name in types for name in ("baseline_verified", "defect_injected", "failure_observed", "repair_verified")),
+        "events": events,
+    }
+
+
 def diagnostics_snapshot(user_id, run_id):
     """Structured v3 diagnostics for future API/UI/export wiring.
 
@@ -703,9 +975,12 @@ def diagnostics_snapshot(user_id, run_id):
         "run": get_v3_run(user_id, run_id),
         "phase_events": list_phase_events(user_id, run_id, limit=300),
         "model_calls": list_model_calls(user_id, run_id, limit=200),
+        "protocol_events": list_protocol_events(user_id, run_id, limit=300),
         "repair_outcomes": list_repair_outcomes(user_id, run_id, limit=200),
         "candidate_validations": list_candidate_validations(user_id, run_id, limit=200),
         "budget_grants": list_budget_grants(user_id, run_id, limit=200),
         "acceptance_evaluations": list_acceptance_evaluations(user_id, run_id, limit=200),
+        "dependency_resolutions": list_dependency_resolutions(user_id, run_id, limit=300),
+        "demonstration": demonstration_status(user_id, run_id),
         "sandbox_executions": executions,
     }

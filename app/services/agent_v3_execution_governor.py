@@ -16,7 +16,13 @@ import app.config as config
 from app.database import get_connection
 from app.services.agents import get_agent_run, list_agent_steps, utc_iso
 from app.services.agent_sandbox import list_agent_sandbox_executions
-from app.services.agent_v3_storage import list_repair_outcomes, record_budget_grant, total_tail_steps
+from app.services.agent_v3_storage import (
+    demonstration_status,
+    list_budget_grants,
+    list_repair_outcomes,
+    record_budget_grant,
+    total_tail_steps,
+)
 from app.services.agent_v3_revision_governance import (
     V3_LIFETIME_STEP_CEILING,
     explicit_resume_grant_reason,
@@ -24,6 +30,8 @@ from app.services.agent_v3_revision_governance import (
 
 TAIL_GRANT_STEPS = 4
 MAX_AUTO_TAIL_STEPS = 8
+DEMONSTRATION_REPAIR_RESERVE_STEPS = 6
+MAX_DEMONSTRATION_REPAIR_RESERVE_STEPS = 8
 EXPLICIT_RESUME_GRANT_STEPS = 6
 TAIL_PHASES = {"starting", "environment", "verify", "repair", "acceptance", "finalize"}
 PROGRESS_CLASSES = {"strong_progress", "changed_failure", "verified"}
@@ -40,6 +48,22 @@ def _latest_completed_action(run):
         if str(step.get("status") or "") == "completed":
             return str(step.get("action") or "")
     return ""
+
+
+def _demonstration_reserve_used(run):
+    return sum(
+        int(item.get("steps") or 0)
+        for item in list_budget_grants(run["user_id"], run["id"], limit=300)
+        if str(item.get("grant_type") or "") == "demonstration_repair_reserve"
+    )
+
+
+def _demonstration_repair_pending(run):
+    demo = demonstration_status(run["user_id"], run["id"])
+    return bool(
+        demo.get("failure_observed")
+        and not demo.get("repair_verified")
+    )
 
 
 def _eligible_reason(run, phase):
@@ -128,6 +152,56 @@ def maybe_grant_tail_budget(run, phase):
                 "ceiling_after": new_ceiling,
                 "reason": resume_reason,
                 "grant_type": "user_resume",
+            }
+
+    # A controlled failure that ATLAS deliberately injected and then
+    # authoritatively observed is *successful demonstration evidence*.  It owns
+    # a small repair/verification reserve independent of the ordinary progress
+    # tail so the lifecycle cannot strand itself immediately after proving the
+    # required failure.
+    if (
+        _demonstration_repair_pending(run)
+        and str(phase) in {"starting", "environment", "verify", "repair", "acceptance", "finalize"}
+    ):
+        reserve_used = _demonstration_reserve_used(run)
+        reserve_remaining = max(0, MAX_DEMONSTRATION_REPAIR_RESERVE_STEPS - reserve_used)
+        lifetime_remaining = max(0, int(V3_LIFETIME_STEP_CEILING) - current)
+        grant = min(DEMONSTRATION_REPAIR_RESERVE_STEPS, reserve_remaining, lifetime_remaining)
+        if grant > 0:
+            base_ceiling = max(current, ceiling)
+            new_ceiling = base_ceiling + grant
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE agent_runs
+                SET max_steps = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (new_ceiling, utc_iso(), str(run["id"]), int(run["user_id"])),
+            )
+            conn.commit()
+            conn.close()
+            reason = (
+                "authoritative controlled-failure evidence was observed; "
+                "reserve bounded repair/verification capacity for the demonstration campaign"
+            )
+            record_budget_grant(
+                run,
+                grant_type="demonstration_repair_reserve",
+                phase=str(phase),
+                steps=grant,
+                reason=reason,
+                ceiling_before=ceiling,
+                ceiling_after=new_ceiling,
+            )
+            return {
+                "granted": True,
+                "steps": grant,
+                "ceiling_before": ceiling,
+                "ceiling_after": new_ceiling,
+                "reason": reason,
+                "grant_type": "demonstration_repair_reserve",
             }
 
     used = total_tail_steps(run["user_id"], run["id"])

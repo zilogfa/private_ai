@@ -14,7 +14,10 @@ Design rules:
 """
 
 import hashlib
+import json
 import re
+
+from app.services.agent_v3_node_evidence import normalize_node_execution
 
 BASE_REPAIR_TRANCHE = 3
 MAX_PROGRESS_EXTENSIONS = 3
@@ -75,6 +78,15 @@ def execution_evidence(execution):
     verified = status == "success" and int(exit_code or 0) == 0
     has_tap = "tap version" in lowered or summary["tests"] > 0 or ok_lines > 0 or not_ok_lines > 0
 
+    node_facts = normalize_node_execution(execution)
+    normalized_fact_markers = []
+    for fact in node_facts.get("facts") or []:
+        kind = str(fact.get("kind") or "")
+        if kind == "undefined_identifier":
+            normalized_fact_markers.append("undefined_identifier:" + str(fact.get("identifier") or "unknown").lower())
+        elif kind:
+            normalized_fact_markers.append(kind)
+
     error_markers = []
     for marker in (
         "syntaxerror",
@@ -90,6 +102,9 @@ def execution_evidence(execution):
         "cannot determine intended module format",
     ):
         if marker in lowered:
+            error_markers.append(marker)
+    for marker in normalized_fact_markers:
+        if marker not in error_markers:
             error_markers.append(marker)
 
     meaningful = []
@@ -115,9 +130,11 @@ def execution_evidence(execution):
         ):
             meaningful.append(line.strip())
     payload = "\n".join(meaningful[-40:]) or normalized[-4500:]
+    fact_payload = json.dumps(node_facts.get("facts") or [], sort_keys=True, ensure_ascii=False) if node_facts.get("facts") else ""
     fingerprint_raw = "|".join([
         str(execution.get("execution_action") or ""),
         str(execution.get("command") or ""),
+        fact_payload,
         payload,
     ])
     fingerprint = hashlib.sha1(
@@ -134,7 +151,11 @@ def execution_evidence(execution):
     score += summary["pass"] * 18
     score -= summary["fail"] * 5
     score -= summary["cancelled"] * 2
-    if "syntaxerror" in error_markers or "referenceerror" in error_markers:
+    if (
+        "syntaxerror" in error_markers
+        or "referenceerror" in error_markers
+        or any(str(marker).startswith("undefined_identifier:") for marker in error_markers)
+    ):
         score -= 20
     if verified:
         score = 10000
@@ -151,6 +172,7 @@ def execution_evidence(execution):
         "skipped": summary["skipped"],
         "todo": summary["todo"],
         "error_markers": error_markers,
+        "normalized_facts": node_facts.get("facts") or [],
         "fingerprint": fingerprint,
         "score": score,
     }

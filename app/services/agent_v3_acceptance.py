@@ -34,6 +34,12 @@ _PLATFORM_GENERIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CONTROL_PLANE_RE = re.compile(
+    r"\b(?:ATLAS\s+v\d+(?:\.\d+)*\s+(?:goal\s+acceptance|agent\s+core)|"
+    r"goal[- ]level\s+acceptance|deterministic\s+final(?:ization)?)\b",
+    re.IGNORECASE,
+)
+
 
 def _criterion_text(item):
     if not isinstance(item, dict):
@@ -56,6 +62,8 @@ def classify_criterion(item):
 
     if _PLATFORM_STRONG_RE.search(low):
         return KIND_PLATFORM
+    if _CONTROL_PLANE_RE.search(text):
+        return KIND_EXECUTION
     if _EXECUTION_RE.search(low):
         return KIND_EXECUTION
     if _PLATFORM_GENERIC_RE.search(low) and any(
@@ -249,7 +257,9 @@ def repairable_acceptance_issues(acceptance):
         "forbidden_dependency",
         "missing_script",
         "insufficient_tests",
-        "required_failure_not_observed",
+        # Fail→repair demonstration provenance is owned by the orchestrator
+        # lifecycle, not by project source. Missing demonstration evidence must
+        # never authorize arbitrary workspace mutation.
         "behavior_unmet",
     }
     issues = []

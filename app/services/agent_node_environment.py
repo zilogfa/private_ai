@@ -63,6 +63,13 @@ NODE_ENV_SETUP_TIMEOUT_SECONDS = int(
     )
 )
 
+NODE_ENV_REGISTRY_PROBE_TIMEOUT_SECONDS = int(
+    os.environ.get(
+        "PRIVATE_AI_AGENT_NODE_ENV_REGISTRY_PROBE_TIMEOUT_SECONDS",
+        "45",
+    )
+)
+
 NODE_ENV_MAX_DEPENDENCIES = int(
     os.environ.get(
         "PRIVATE_AI_AGENT_NODE_ENV_MAX_DEPENDENCIES",
@@ -424,6 +431,323 @@ def _sanitize_package_spec(spec):
         )
 
     return value
+
+
+def _registry_probe_target(package_name, package_spec=None):
+    name = _sanitize_package_name(package_name)
+    spec = str(package_spec or "").strip()
+    if not spec or spec in {"*", "latest"}:
+        return name
+    return f"{name}@{_sanitize_package_spec(spec)}"
+
+
+def _npm_registry_probe(package_name, package_spec=None, cancel_check=None):
+    """Probe npm metadata inside an isolated network-enabled base container.
+
+    No user source, prompts, memory, credentials, workspace files or scripts are
+    mounted into this container. The probe receives only one sanitized registry
+    package name/specifier and asks npm for published version metadata.
+    """
+    target = _registry_probe_target(package_name, package_spec)
+    return _run_cancellable(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "default",
+            NODE_BASE_IMAGE,
+            "npm",
+            "view",
+            target,
+            "version",
+            "--json",
+        ],
+        NODE_ENV_REGISTRY_PROBE_TIMEOUT_SECONDS,
+        cancel_check=cancel_check,
+    )
+
+
+def _registry_probe_succeeded(result):
+    return bool(
+        int((result or {}).get("returncode") or 0) == 0
+        and not (result or {}).get("timed_out")
+    )
+
+
+def _registry_error_kind(result):
+    """Classify transport/registry failures, not package-vs-version existence.
+
+    npm has changed the exact error code/text used for unavailable package
+    versions across releases. In particular, an unavailable VERSION can be
+    surfaced as E404/'not found' instead of ETARGET. Package existence is now
+    established with a separate bare-package probe before a specifier is
+    validated, so callers must not infer package existence from this string
+    classifier alone.
+    """
+    text = "\n".join([
+        str((result or {}).get("stdout") or ""),
+        str((result or {}).get("stderr") or ""),
+    ]).lower()
+    if (result or {}).get("timed_out"):
+        return "timeout"
+    if "e401" in text or "e403" in text or "unauthorized" in text or "forbidden" in text:
+        return "registry_auth_error"
+    if "enotfound" in text or "eai_again" in text or "network" in text or "fetch failed" in text:
+        return "registry_network_error"
+    if "etarget" in text or "no matching version found" in text or "no match found for version" in text:
+        return "specifier_unavailable"
+    if "e404" in text or "not found" in text:
+        return "not_found"
+    return "registry_error"
+
+
+def _extract_registry_version(result):
+    text = str((result or {}).get("stdout") or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = text.strip('\"\' ')
+    if isinstance(parsed, str):
+        return parsed.strip()
+    if isinstance(parsed, list):
+        values = [str(item).strip() for item in parsed if str(item).strip()]
+        return values[-1] if values else ""
+    return ""
+
+
+def _resolve_registry_dependency(
+    package_name,
+    current_spec,
+    *,
+    explicit_spec=None,
+    cancel_check=None,
+):
+    """Resolve one dependency with package existence and spec validation split.
+
+    A bare-package probe answers *does this package exist and what is the
+    registry default version?* Only after that succeeds do we validate a
+    particular version/range. This avoids treating npm's E404 for a nonexistent
+    VERSION as proof that the PACKAGE itself does not exist.
+
+    Model/project-owned ranges are normalized to a concrete published version
+    so the content-addressed dependency image remains reproducible. Explicit
+    user constraints are validated but preserved verbatim in package.json.
+    """
+    package = _sanitize_package_name(package_name)
+    candidate_spec = _sanitize_package_spec(current_spec)
+    explicit = (
+        _sanitize_package_spec(explicit_spec)
+        if str(explicit_spec or "").strip()
+        else ""
+    )
+
+    bare_probe = _npm_registry_probe(
+        package,
+        None,
+        cancel_check=cancel_check,
+    )
+    if not _registry_probe_succeeded(bare_probe):
+        kind = _registry_error_kind(bare_probe)
+        if kind == "timeout":
+            raise AgentEnvironmentError(
+                f"Timed out while checking npm package {package} in the configured registry."
+            )
+        raise AgentEnvironmentError(
+            f"npm package {package} could not be confirmed in the configured registry "
+            f"({kind.replace('_', ' ')}). The package existence check failed before version validation."
+        )
+
+    latest = _extract_registry_version(bare_probe)
+    if not latest:
+        raise AgentEnvironmentError(
+            f"npm package {package} exists, but the registry returned no usable default version metadata."
+        )
+    _sanitize_package_spec(latest)
+
+    requested = explicit or candidate_spec
+    # Bare/latest/* are already satisfied by the package-existence probe.
+    if requested in {"*", "latest"}:
+        if explicit:
+            return {
+                "package": package,
+                "requested_spec": candidate_spec,
+                "effective_spec": explicit,
+                "resolved_version": latest,
+                "manifest_spec": explicit,
+                "provenance": "user_constraint",
+                "status": "user_constraint_enforced",
+                "detail": f"Registry confirmed {package}; explicit user constraint {explicit} is preserved.",
+            }
+        return {
+            "package": package,
+            "requested_spec": candidate_spec,
+            "effective_spec": latest,
+            "resolved_version": latest,
+            "manifest_spec": latest,
+            "provenance": "project_candidate",
+            "status": "registry_resolved",
+            "detail": f"ATLAS resolved model/project specifier {candidate_spec} to published registry version {latest}.",
+        }
+
+    spec_probe = _npm_registry_probe(
+        package,
+        requested,
+        cancel_check=cancel_check,
+    )
+    if _registry_probe_succeeded(spec_probe):
+        matched = _extract_registry_version(spec_probe)
+        if not matched:
+            # The spec was accepted by npm but version metadata was malformed;
+            # preserve an explicit user constraint, otherwise use the already
+            # confirmed registry default rather than guessing.
+            matched = requested if explicit else latest
+        _sanitize_package_spec(matched)
+        if explicit:
+            return {
+                "package": package,
+                "requested_spec": candidate_spec,
+                "effective_spec": explicit,
+                "resolved_version": matched,
+                "manifest_spec": explicit,
+                "provenance": "user_constraint",
+                "status": "user_constraint_enforced" if candidate_spec != explicit else "validated",
+                "detail": f"Registry confirmed explicit user dependency constraint {package}@{explicit}.",
+            }
+        return {
+            "package": package,
+            "requested_spec": candidate_spec,
+            "effective_spec": matched,
+            "resolved_version": matched,
+            "manifest_spec": matched,
+            "provenance": "project_candidate",
+            "status": "registry_resolved" if candidate_spec != matched else "validated",
+            "detail": f"Registry resolved model/project dependency {package}@{candidate_spec} to published version {matched}.",
+        }
+
+    failure_kind = _registry_error_kind(spec_probe)
+    if explicit:
+        raise AgentEnvironmentError(
+            f"npm package {package} exists, but explicit user dependency constraint {package}@{explicit} "
+            f"could not be resolved ({failure_kind.replace('_', ' ')}). ATLAS will not silently change a user constraint."
+        )
+
+    # The package itself was already proven to exist. Therefore a failed
+    # model-owned specifier is recoverable regardless of whether this npm
+    # version spells the error ETARGET, E404, or 'not found'.
+    return {
+        "package": package,
+        "requested_spec": candidate_spec,
+        "effective_spec": latest,
+        "resolved_version": latest,
+        "manifest_spec": latest,
+        "provenance": "project_candidate",
+        "status": "registry_recovered",
+        "detail": (
+            f"Model/project specifier {candidate_spec} did not resolve ({failure_kind.replace('_', ' ')}); "
+            f"package existence was independently confirmed and ATLAS recovered to published registry version {latest}."
+        ),
+    }
+
+
+def _rewrite_dependency_specs(user_id, run_id, replacements):
+    if not replacements:
+        return None
+    raw = _parse_workspace_package_json(user_id, run_id)
+    changed = False
+    normalized = {str(name).lower(): str(spec) for name, spec in replacements.items()}
+    for section in ("dependencies", "devDependencies"):
+        values = raw.get(section)
+        if not isinstance(values, dict):
+            continue
+        for name in list(values):
+            replacement = normalized.get(str(name).lower())
+            if replacement and str(values.get(name)) != replacement:
+                values[name] = replacement
+                changed = True
+    if not changed:
+        return None
+    # Re-run the normal Project-profile sanitizer before touching the durable
+    # manifest. Registry recovery never broadens the allowed npm spec surface.
+    sanitize_node_manifest(raw)
+    return write_workspace_file(
+        user_id,
+        run_id,
+        "package.json",
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def reconcile_node_dependency_manifest(
+    user_id,
+    run_id,
+    *,
+    dependency_constraints=None,
+    cancel_check=None,
+):
+    """Resolve project dependencies using registry-grounded provenance.
+
+    Package existence and version/range resolution are deliberately separate.
+    Model/project specs may be normalized or recovered to a concrete published
+    version. Explicit user constraints are validated and never silently
+    changed.
+    """
+    manifest = current_node_manifest(user_id, run_id)
+    constraints = {
+        str(name).lower(): _sanitize_package_spec(spec)
+        for name, spec in dict(dependency_constraints or {}).items()
+        if str(name).strip() and str(spec).strip()
+    }
+    resolutions = []
+    replacements = {}
+
+    for section in ("dependencies", "devDependencies"):
+        for package_name, current_spec in (manifest.get(section) or {}).items():
+            explicit = constraints.get(str(package_name).lower())
+            decision = _resolve_registry_dependency(
+                package_name,
+                current_spec,
+                explicit_spec=explicit,
+                cancel_check=cancel_check,
+            )
+            manifest_spec = str(decision.get("manifest_spec") or current_spec)
+            if str(current_spec) != manifest_spec:
+                replacements[package_name] = manifest_spec
+            resolutions.append({
+                "package": str(package_name),
+                "requested_spec": str(current_spec),
+                "effective_spec": str(decision.get("effective_spec") or manifest_spec),
+                "resolved_version": str(decision.get("resolved_version") or ""),
+                "provenance": str(decision.get("provenance") or ("user_constraint" if explicit else "project_candidate")),
+                "status": str(decision.get("status") or "validated"),
+                "detail": str(decision.get("detail") or "Registry metadata confirmed the dependency."),
+            })
+
+    write_result = _rewrite_dependency_specs(user_id, run_id, replacements)
+    return {
+        "changed": bool(write_result),
+        "file": write_result,
+        "resolutions": resolutions,
+        "manifest": current_node_manifest(user_id, run_id),
+    }
+
+
+def _compact_node_setup_error(error_text):
+    text = str(error_text or "")
+    lower = text.lower()
+    if "etarget" in lower or "no matching version found" in lower:
+        match = re.search(r"No matching version found for ([^\\s.]+(?:@[^\\s.]+)?)", text, re.IGNORECASE)
+        target = match.group(1) if match else "one declared npm dependency"
+        return f"npm registry rejected {target}: the requested package version does not exist."
+    if "e404" in lower or "not found" in lower:
+        return "npm registry could not find one of the declared packages."
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    npm_lines = [line for line in lines if "npm error" in line.lower()]
+    if npm_lines:
+        return " ".join(npm_lines[-3:])[-1800:]
+    return (" ".join(lines[-5:]) or "Docker/npm setup failed.")[-1800:]
 
 
 def sanitize_node_manifest(data):
@@ -1352,6 +1676,8 @@ def setup_node_project_environment(
     user_id,
     run_id,
     cancel_check=None,
+    *,
+    dependency_constraints=None,
 ):
     initialize_agent_node_environment_storage()
 
@@ -1438,6 +1764,30 @@ def setup_node_project_environment(
                 )[-1800:]
             )
 
+    dependency_reconciliation = {
+        "changed": False,
+        "resolutions": [],
+    }
+    if requested:
+        _set_environment_activity(
+            user_id,
+            run_id,
+            status="running",
+            stage="registry_validation",
+            detail="Validating declared npm versions against registry metadata…",
+            progress=13,
+        )
+        dependency_reconciliation = reconcile_node_dependency_manifest(
+            user_id,
+            run_id,
+            dependency_constraints=dependency_constraints,
+            cancel_check=cancel_check,
+        )
+        # Registry reconciliation may have rewritten a hallucinated model pin.
+        # Recompute the exact sanitized manifest before hashing/building it.
+        manifest = current_node_manifest(user_id, run_id)
+        requested = _dependency_labels(manifest)
+
     if not requested:
         _update_environment_state(
             user_id,
@@ -1466,6 +1816,7 @@ def setup_node_project_environment(
             "requested": [],
             "resolved": [],
             "duration_ms": 0,
+            "dependency_resolutions": dependency_reconciliation.get("resolutions") or [],
         }
 
     manifest_hash = _manifest_hash(
@@ -1534,6 +1885,7 @@ def setup_node_project_environment(
             "requested": requested,
             "resolved": resolved,
             "duration_ms": 0,
+            "dependency_resolutions": dependency_reconciliation.get("resolutions") or [],
         }
 
     _update_environment_state(
@@ -1813,11 +2165,9 @@ def setup_node_project_environment(
 
     if build_status != "ready":
         raise AgentEnvironmentError(
-            "Node Project dependency setup failed. "
-            + (
-                error_text[-2200:]
-                or "Docker build failed."
-            )
+            "Node Project dependency setup failed: "
+            + _compact_node_setup_error(error_text)
+            + " Full Docker/npm output is preserved in the environment build history."
         )
 
     return {
@@ -1831,6 +2181,7 @@ def setup_node_project_environment(
             "duration_ms"
         )
         or 0,
+        "dependency_resolutions": dependency_reconciliation.get("resolutions") or [],
     }
 
 

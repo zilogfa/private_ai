@@ -5,9 +5,9 @@ owns project construction, dependency setup, authoritative verification,
 evidence extraction, bounded repair, and final goal acceptance for Node work.
 
 Important design rule: BUILD validity and FINAL acceptance are different gates.
-The initial project may still contain an implementation defect; it only needs to
-be coherent and safe enough to execute.  Final acceptance is evaluated after
-real sandbox evidence exists.
+The initial build may still contain ordinary accidental defects, but the user-requested
+demonstration defect is lifecycle-owned and is never inserted during BUILD.  Final
+acceptance is evaluated only after real sandbox evidence exists.
 """
 
 import hashlib
@@ -32,7 +32,23 @@ from app.services.agent_sandbox import (
     write_workspace_file,
 )
 from app.services.agent_v3_model_gateway import V3ModelError, run_json
+from app.services.agent_v3_action_protocol import (
+    BUILD_ACTION_SCHEMA,
+    DEFECT_ACTION_SCHEMA,
+    REPAIR_ACTION_SCHEMA,
+)
 from app.services.agent_v3_candidate_pipeline import V3CandidateError, validate_candidate
+from app.services.agent_v3_mutation_testing import (
+    V3MutationError,
+    is_legitimate_failing_execution,
+    select_failing_node_mutant,
+)
+from app.services.agent_v3_node_evidence import (
+    fact_values,
+    has_fact,
+    implicated_lines,
+    normalize_node_execution,
+)
 from app.services.agent_v3_acceptance import (
     KIND_EXECUTION,
     KIND_PLATFORM,
@@ -275,17 +291,15 @@ def _coerce_generated_content(filename, content):
 
 
 def _test_harness_diagnostics(run, execution=None):
-    """Return deterministic diagnostics for verifier/test-harness mechanics.
+    """Return normalized verifier/test-harness mechanics diagnostics.
 
-    These diagnostics do not change tests themselves.  They authorize a repair
-    model to fix test *mechanics* while a separate integrity guard preserves
-    the existing test names/count.
+    Policy consumes structured Node failure facts instead of depending on one
+    exact stderr/TAP rendering.  The same undefined identifier may appear as
+    ``ReferenceError: assert is not defined`` or TAP ``error: 'assert is not
+    defined'``; both must grant the same bounded mechanics authority.
     """
     diagnostics = []
-    evidence = "\n".join([
-        str((execution or {}).get("stdout") or ""),
-        str((execution or {}).get("stderr") or ""),
-    ]).lower()
+    normalized = normalize_node_execution(execution)
 
     for filename in _workspace_names(run):
         if not _is_test_filename(filename):
@@ -300,18 +314,19 @@ def _test_harness_diagnostics(run, execution=None):
             re.search(r"require\s*\(\s*['\"]node:test['\"]\s*\)", source)
             or re.search(r"from\s+['\"]node:test['\"]", source)
         )
-        if uses_node_test_api and not imports_node_test:
-            if any(
-                token in evidence
-                for token in (
-                    "referenceerror: describe is not defined",
-                    "referenceerror: it is not defined",
-                    "referenceerror: test is not defined",
-                )
-            ):
-                diagnostics.append(
-                    f"{filename}: Node built-in test API is used but node:test is not imported."
-                )
+        missing_test_bindings = {
+            str(value).lower()
+            for value in fact_values(normalized, "undefined_identifier", "identifier")
+            if str(value).lower() in {"describe", "it", "test"}
+        }
+        missing_test_bindings.update(
+            str(value).lower()
+            for value in fact_values(normalized, "missing_node_test_binding", "identifier")
+        )
+        if uses_node_test_api and not imports_node_test and missing_test_bindings:
+            diagnostics.append(
+                f"{filename}: Node built-in test API binding is missing ({', '.join(sorted(missing_test_bindings))}); import node:test without changing behavioral cases."
+            )
 
         if re.search(
             r"\b(?:const|let|var)\s*\{\s*assert\s*\}\s*=\s*require\s*\(\s*['\"](?:node:)?assert(?:/strict)?['\"]\s*\)",
@@ -322,31 +337,42 @@ def _test_harness_diagnostics(run, execution=None):
             )
 
         if (
-            "cannot determine intended module format" in evidence
-            or "both require() and top-level await" in evidence
+            has_fact(normalized, "undefined_identifier", identifier="assert")
+            and re.search(r"\bassert\s*\.", source)
+            and not _has_assert_binding(source)
         ):
             diagnostics.append(
-                f"{filename}: Node rejected the file because CommonJS require()/exports and top-level await were mixed; "
-                "keep one module system. For a CommonJS test file, remove top-level await and use async parent callbacks with await t.test(...), "
-                "or flatten the existing behavioral cases into independent top-level tests."
+                f"{filename}: authoritative Node evidence proves assert is used without a valid built-in assert binding."
             )
 
         if (
-            "cancelledbyparent" in evidence
-            or "test did not finish before its parent and was cancelled" in evidence
+            has_fact(normalized, "sync_callback_used_with_assert_rejects")
+            and re.search(r"\bassert\.rejects\s*\(", source)
         ):
-            # Generic node:test lifecycle rule: child tests created inside a
-            # parent callback must be awaited/returned through the parent test
-            # context, or flattened into independent top-level tests.  This is
-            # verifier mechanics, not permission to weaken test semantics.
             diagnostics.append(
-                f"{filename}: node:test child tests are being cancelled by their parent; "
-                "await child tests through an async parent test context (for example await t.test(...)) "
-                "or flatten the existing cases to top-level tests while preserving every test case."
+                f"{filename}: Node assert.rejects received a callback that threw synchronously in the real run; "
+                "preserve the intended error assertion but use assert.throws for the implicated synchronous call(s)."
+            )
+
+        if has_fact(normalized, "module_format_conflict"):
+            diagnostics.append(
+                f"{filename}: Node rejected mixed module mechanics; keep one coherent CommonJS/ESM style without changing test semantics."
+            )
+
+        if has_fact(normalized, "cancelled_child_tests"):
+            diagnostics.append(
+                f"{filename}: node:test child tests are being cancelled by their parent; await child tests or flatten the same behavioral cases without removing assertions."
             )
 
     return diagnostics
 
+
+def _test_assertion_count(source):
+    text = str(source or "")
+    # Count assertion invocations rather than imports/bindings.  This is a
+    # conservative semantic floor: test-harness repair may change assertion
+    # mechanics (rejects -> throws) but must not silently reduce checks.
+    return len(re.findall(r"\bassert(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+\s*\(", text))
 
 def _test_contract_snapshot(run):
     snapshot = {}
@@ -375,19 +401,22 @@ def _validate_test_change_integrity(run, spec, files):
 
     before = _test_contract_snapshot(run)
     baseline_names = []
+    baseline_assertions = 0
     for item in before.values():
         baseline_names.extend(item.get("names") or [])
+        baseline_assertions += _test_assertion_count(item.get("content") or "")
 
     candidate_names = []
+    candidate_assertions = 0
     all_names = set(before) | set(changed_tests)
     for filename in all_names:
         source = changed_tests.get(filename)
         if source is None:
             source = (before.get(filename) or {}).get("content") or ""
         candidate_names.extend(_test_names_from_source(source))
+        candidate_assertions += _test_assertion_count(source)
 
-    # Repair may fix imports/assertion mechanics or add coverage, but must not
-    # silently erase the already-established test specification.
+    # Test semantics are protected even when harness mechanics are repairable.
     if len(candidate_names) < len(baseline_names):
         raise V3NodeError(
             f"Repair test change would reduce test coverage from {len(baseline_names)} to {len(candidate_names)} tests."
@@ -400,12 +429,16 @@ def _validate_test_change_integrity(run, spec, files):
             + ", ".join(missing_names[:12])
         )
 
+    if candidate_assertions < baseline_assertions:
+        raise V3NodeError(
+            f"Repair test change would reduce assertion coverage from {baseline_assertions} to {candidate_assertions}."
+        )
+
     minimum = int(spec.get("min_tests") or 0)
     if minimum and len(candidate_names) < minimum:
         raise V3NodeError(
             f"Repair test change still defines only {len(candidate_names)} tests; goal requires at least {minimum}."
         )
-
 
 def _filter_noop_changes(run, files):
     existing = {name.lower(): name for name in _workspace_names(run)}
@@ -507,9 +540,13 @@ def _apply_files(run, files):
 def bootstrap_project(run, spec):
     system = (
         "You are ATLAS v3 BUILD, a senior Node.js engineer. Construct one coherent initial project from the goal/spec. "
-        "This is BUILD, not final acceptance: make the project structurally complete and executable, but a requested deliberate implementation defect may remain so VERIFY can observe it. "
-        "Never weaken the user's test requirements. If a fail→repair demonstration is requested, tests must describe the correct behavior and exactly one small defect must be in implementation code, preferably easy to diagnose. "
-        "Use the requested npm dependencies rather than replacing them. Return ONLY JSON: {summary, files:[{filename,content,reason}]}. "
+        "BUILD must target an intended-correct baseline. Do NOT deliberately insert the user's requested demonstration defect during BUILD; "
+        "the orchestrator owns that later lifecycle stage only after a clean baseline verification exists. "
+        "The initial project may still contain ordinary mistakes, which VERIFY/REPAIR will diagnose, but do not manufacture them. "
+        "Never weaken the user's test requirements. Tests must always describe the correct intended behavior. "
+        "Use the requested npm dependencies rather than replacing them. Dependency version strings are implementation suggestions unless the user explicitly pinned a version; "
+        "ATLAS validates them against registry metadata during the controlled environment phase. "
+        "Return ONLY JSON: {summary, files:[{filename,content,reason}]}. "
         "Each content field is the COMPLETE file. Keep the project small and readable."
     )
     user = (
@@ -528,6 +565,8 @@ def bootstrap_project(run, spec):
                 system_prompt=system,
                 user_prompt=user + (f"\n\nPREVIOUS CANDIDATE REJECTION:\n{last_error}" if last_error else ""),
                 tier=tier,
+                schema=BUILD_ACTION_SCHEMA,
+                schema_name="node_build_action_v1",
             )
             files = _parse_file_set(data, spec, require_all_explicit=True, allow_test_changes=True)
             # A minimum test count is structural enough to repair internally on bootstrap,
@@ -564,25 +603,41 @@ def bootstrap_project(run, spec):
     )
 
 
-def ensure_environment(run):
+def ensure_environment(run, spec=None):
     profile = str((get_agent_run_environment(run["user_id"], run["id"]) or {}).get("profile") or "strict")
     status = node_environment_status_for_run(run["user_id"], run["id"])
     if profile != ENV_PROFILE_PROJECT:
         if not status.get("ready"):
             raise V3NodeError(status.get("message") or "Node base runtime is not ready.")
-        return {"setup": False, "status": status}
+        return {"setup": False, "status": status, "dependency_resolutions": []}
 
     if status.get("ready"):
-        return {"setup": False, "status": status}
-    if status.get("failed_current"):
-        raise V3NodeError(status.get("last_error") or status.get("message") or "Current Node dependency environment failed.")
+        return {"setup": False, "status": status, "dependency_resolutions": []}
 
+    # v3.5: a previously failed dependency image is not automatically terminal.
+    # setup_node_project_environment() first validates model/project package
+    # versions against registry metadata and can rewrite a hallucinated unpinned
+    # version before computing the new environment hash. Explicit user pins are
+    # never silently changed.
     built = setup_node_project_environment(
         run["user_id"],
         run["id"],
         cancel_check=lambda: legacy_runner._control_probe(run),
+        dependency_constraints=dict((spec or {}).get("dependency_constraints") or {}),
     )
-    return {"setup": True, "build": built, "status": node_environment_status_for_run(run["user_id"], run["id"])}
+    resolutions = list(built.get("dependency_resolutions") or [])
+    if resolutions:
+        try:
+            from app.services.agent_v3_storage import record_dependency_resolutions
+            record_dependency_resolutions(run, resolutions)
+        except Exception:
+            pass
+    return {
+        "setup": True,
+        "build": built,
+        "status": node_environment_status_for_run(run["user_id"], run["id"]),
+        "dependency_resolutions": resolutions,
+    }
 
 
 def _verification_target(run):
@@ -654,28 +709,306 @@ def failure_fingerprint(execution):
     return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:18]
 
 
-def _repair_allowed_test_files(run, spec, execution=None, acceptance_issues=None):
-    # Test *semantics* are protected after BUILD. Test files may still be
-    # repaired when deterministic evidence shows the verifier/harness itself
-    # is broken, or when final acceptance proves coverage is incomplete.
-    if _test_harness_diagnostics(run, execution):
-        return True
+def _test_repair_authority(run, spec, execution=None, acceptance_issues=None):
+    """Return explicit bounded authority for test-file mutation.
+
+    Tests are user/project specifications.  ATLAS may mutate a test file only
+    when normalized runtime evidence proves a harness/mechanics defect, or when
+    final acceptance proves that requested coverage itself is missing.
+    """
+    normalized = normalize_node_execution(execution)
+    permissions = []
+
+    diagnostics = _test_harness_diagnostics(run, execution)
+    implicated_files = {
+        str(item.get("filename") or "").lower()
+        for item in (normalized or {}).get("locations") or []
+        if str(item.get("filename") or "")
+    }
+    if diagnostics:
+        for filename in _workspace_names(run):
+            if not _is_test_filename(filename):
+                continue
+            try:
+                source = read_workspace_file(run["user_id"], run["id"], filename, max_chars=70000)
+            except Exception:
+                continue
+            kinds = []
+            location_matches = not implicated_files or filename.lower() in implicated_files
+            if location_matches and has_fact(normalized, "undefined_identifier", identifier="assert") and re.search(r"\bassert\s*\.", source) and not _has_assert_binding(source):
+                kinds.append("missing_assert_binding")
+            if location_matches and has_fact(normalized, "sync_callback_used_with_assert_rejects") and re.search(r"\bassert\.rejects\s*\(", source):
+                kinds.append("sync_assertion_mechanics")
+            if location_matches and has_fact(normalized, "module_format_conflict"):
+                kinds.append("module_format_mechanics")
+            if location_matches and has_fact(normalized, "cancelled_child_tests"):
+                kinds.append("node_test_lifecycle")
+            missing_test_api = {str(v).lower() for v in fact_values(normalized, "undefined_identifier", "identifier")} & {"describe", "it", "test"}
+            if missing_test_api:
+                kinds.append("missing_node_test_binding")
+            if kinds:
+                permissions.append({
+                    "filename": filename,
+                    "scope": "mechanics_only",
+                    "kinds": sorted(set(kinds)),
+                    "implicated_lines": implicated_lines(normalized, filename),
+                })
+
+    # Coverage creation is a separate authority. It is not mechanics-only, but
+    # the semantic-preservation gate still prevents deleting established cases.
     if len(_test_names(run)) < int(spec.get("min_tests") or 0):
-        return True
+        permissions.append({"filename": "*", "scope": "coverage_addition", "kinds": ["insufficient_tests"], "implicated_lines": []})
     for issue in acceptance_issues or []:
         if str(issue.get("type") or "") in {"behavior_unmet", "insufficient_tests"}:
-            return True
-    return False
+            permissions.append({"filename": "*", "scope": "coverage_addition", "kinds": [str(issue.get("type"))], "implicated_lines": []})
 
+    # Deduplicate while preserving diagnostic order.
+    result = []
+    seen = set()
+    for item in permissions:
+        key = (str(item.get("filename")), str(item.get("scope")), tuple(item.get("kinds") or []))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+def _repair_allowed_test_files(run, spec, execution=None, acceptance_issues=None):
+    return bool(_test_repair_authority(run, spec, execution, acceptance_issues))
+
+def _node_package_type(run):
+    try:
+        raw = read_workspace_file(run["user_id"], run["id"], "package.json", max_chars=30000)
+        package = json.loads(raw)
+        return str(package.get("type") or "").strip().lower() if isinstance(package, dict) else ""
+    except Exception:
+        return ""
+
+
+def _has_assert_binding(source):
+    text = str(source or "")
+    return bool(
+        re.search(r"\b(?:const|let|var)\s+assert\s*=\s*require\s*\(\s*['\"](?:node:)?assert(?:/strict)?['\"]\s*\)", text)
+        or re.search(r"\bimport\s+assert\s+from\s+['\"](?:node:)?assert(?:/strict)?['\"]", text)
+    )
+
+
+def _has_module_binding(source, variable, package):
+    text = str(source or "")
+    variable = re.escape(str(variable or ""))
+    package = re.escape(str(package or ""))
+    return bool(
+        re.search(rf"\b(?:const|let|var)\s+{variable}\s*=\s*require\s*\(\s*['\"]{package}(?:/[^'\"]*)?['\"]\s*\)", text)
+        or re.search(rf"\bimport\s+{variable}\s+from\s+['\"]{package}(?:/[^'\"]*)?['\"]", text)
+        or re.search(rf"\bimport\s+\*\s+as\s+{variable}\s+from\s+['\"]{package}(?:/[^'\"]*)?['\"]", text)
+    )
+
+
+def _insert_top_level_binding(source, binding_line):
+    text = str(source or "")
+    if binding_line in text:
+        return text
+    lines = text.splitlines()
+    insert_at = 0
+    if lines and lines[0].startswith("#!"):
+        insert_at = 1
+    # Keep the import/require header together.  This deliberately does not try
+    # to rewrite arbitrary source structure; it only inserts one proven binding.
+    while insert_at < len(lines):
+        stripped = lines[insert_at].strip()
+        if not stripped:
+            if insert_at:
+                break
+            insert_at += 1
+            continue
+        if (
+            stripped.startswith("const ")
+            or stripped.startswith("let ")
+            or stripped.startswith("var ")
+            or stripped.startswith("import ")
+        ) and ("require(" in stripped or stripped.startswith("import ")):
+            insert_at += 1
+            continue
+        break
+    lines.insert(insert_at, binding_line)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _repair_sync_rejects_mechanics(source, implicated):
+    """Convert only evidence-implicated sync assert.rejects calls to throws.
+
+    Node's stack normally points at or immediately inside the assert.rejects
+    callback.  A small line-radius keeps the deterministic edit scoped to the
+    assertions actually observed failing.
+    """
+    lines = str(source or "").splitlines()
+    implicated = {int(value) for value in (implicated or []) if int(value or 0) > 0}
+    changed = False
+    for index, line in enumerate(lines):
+        if not re.search(r"\bawait\s+assert\.rejects\s*\(", line):
+            continue
+        line_number = index + 1
+        if implicated and not any(abs(line_number - value) <= 4 for value in implicated):
+            continue
+        lines[index] = re.sub(r"\bawait\s+assert\.rejects\s*\(", "assert.throws(", line, count=1)
+        changed = True
+    if not changed:
+        return None
+    return "\n".join(lines) + ("\n" if str(source or "").endswith("\n") else "")
+
+
+def _deterministic_mechanical_repair(run, spec, execution, test_authority=None):
+    """Return one evidence-proven mechanical repair or None.
+
+    The lane operates on normalized Node facts and explicit test-repair
+    authority.  Renderer-specific strings are never the trust boundary.
+    Business logic and ambiguous changes remain model work.
+    """
+    if not execution:
+        return None
+    normalized = normalize_node_execution(execution)
+    package_type = _node_package_type(run)
+    authority = list(test_authority or [])
+    authorized_test_files = {
+        str(item.get("filename") or "").lower()
+        for item in authority
+        if str(item.get("scope") or "") == "mechanics_only"
+    }
+
+    candidates = []
+    diagnosis = "Authoritative runtime evidence proved a mechanical module/test-harness defect."
+    hypothesis = "Apply only the evidence-proven mechanics correction and preserve all behavior/test semantics."
+
+    # Missing Node assert binding.  TAP may report this as a ReferenceError or
+    # as `error: 'assert is not defined'`; normalized facts make both identical.
+    if has_fact(normalized, "undefined_identifier", identifier="assert"):
+        for filename in _workspace_names(run):
+            if not _is_test_filename(filename) or filename.lower() not in authorized_test_files:
+                continue
+            try:
+                source = read_workspace_file(run["user_id"], run["id"], filename, max_chars=70000)
+            except Exception:
+                continue
+            if not re.search(r"\bassert\s*\.", source) or _has_assert_binding(source):
+                continue
+            esm = filename.lower().endswith(".mjs") or package_type == "module" or bool(re.search(r"(?m)^\s*import\b", source))
+            binding = "import assert from 'node:assert/strict';" if esm else "const assert = require('node:assert/strict');"
+            content = _insert_top_level_binding(source, binding)
+            candidates.append({
+                "filename": filename,
+                "content": content,
+                "reason": "Normalized authoritative Node evidence proves the test harness uses assert without importing the built-in assert module.",
+            })
+            diagnosis = "Normalized Node evidence proved the test harness is missing the built-in assert binding."
+            hypothesis = "Add only the missing assert binding; preserve every existing test and assertion."
+            break
+
+    # Synchronous callback passed to assert.rejects.  The real Node stack proves
+    # waitForActual/Function.rejects observed a synchronous throw.  Convert only
+    # implicated assertion calls, not arbitrary async behavior.
+    if not candidates and has_fact(normalized, "sync_callback_used_with_assert_rejects"):
+        for filename in _workspace_names(run):
+            if not _is_test_filename(filename) or filename.lower() not in authorized_test_files:
+                continue
+            try:
+                source = read_workspace_file(run["user_id"], run["id"], filename, max_chars=70000)
+            except Exception:
+                continue
+            content = _repair_sync_rejects_mechanics(
+                source,
+                implicated_lines(normalized, filename),
+            )
+            if content is None:
+                continue
+            candidates.append({
+                "filename": filename,
+                "content": content,
+                "reason": "Authoritative Node assert stack proves the implicated callbacks throw synchronously; use assert.throws while preserving the same error expectations.",
+            })
+            diagnosis = "Normalized Node evidence proved synchronous callbacks are being asserted with assert.rejects."
+            hypothesis = "Change only the implicated assertion mechanics from rejects to throws; preserve test names, callbacks, messages and assertion count."
+            break
+
+    # Required package referenced as an undefined bare identifier without an
+    # import.  Normalize TAP/ReferenceError variants before matching the user's
+    # required dependency contract.
+    if not candidates:
+        undefined = [str(value) for value in fact_values(normalized, "undefined_identifier", "identifier")]
+        required = [str(item) for item in spec.get("required_dependencies") or []]
+        missing_var = next((value for value in undefined if value in required and re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", value)), "")
+        package = missing_var or None
+        if package:
+            for filename in _workspace_names(run):
+                if not filename.lower().endswith((".js", ".mjs", ".cjs")):
+                    continue
+                try:
+                    source = read_workspace_file(run["user_id"], run["id"], filename, max_chars=70000)
+                except Exception:
+                    continue
+                if not re.search(rf"\b{re.escape(missing_var)}\s*\.", source) or _has_module_binding(source, missing_var, package):
+                    continue
+                esm = filename.lower().endswith(".mjs") or package_type == "module" or bool(re.search(r"(?m)^\s*import\b", source))
+                binding = f"import {missing_var} from '{package}';" if esm else f"const {missing_var} = require('{package}');"
+                content = _insert_top_level_binding(source, binding)
+                candidates.append({
+                    "filename": filename,
+                    "content": content,
+                    "reason": f"Normalized authoritative Node evidence proves required dependency {package} is referenced without a module binding.",
+                })
+                diagnosis = f"Normalized Node evidence proved required dependency {package} is missing its module binding."
+                hypothesis = f"Add only the missing {package} binding and preserve project behavior."
+                break
+
+    if not candidates:
+        return None
+
+    if any(_is_test_filename(item["filename"]) for item in candidates):
+        _validate_test_change_integrity(run, spec, candidates)
+    candidates = _filter_noop_changes(run, candidates)
+    preflight = validate_candidate(
+        run,
+        candidates,
+        baseline_execution=execution,
+        purpose="repair",
+    )
+    changed = _apply_files(run, candidates)
+    return {
+        "model": "deterministic",
+        "lane": "deterministic_mechanical",
+        "diagnosis": diagnosis,
+        "hypothesis": hypothesis,
+        "harness_diagnostics": _test_harness_diagnostics(run, execution),
+        "test_repair_authority": authority,
+        "preflight": preflight,
+        "changed": changed,
+    }
 
 def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_history=None):
     harness_diagnostics = _test_harness_diagnostics(run, execution)
-    allow_tests = _repair_allowed_test_files(
+    test_authority = _test_repair_authority(
         run,
         spec,
         execution=execution,
         acceptance_issues=acceptance_issues,
     )
+    allow_tests = bool(test_authority)
+    deterministic_rejection = None
+    try:
+        deterministic = _deterministic_mechanical_repair(
+            run,
+            spec,
+            execution,
+            test_authority,
+        )
+    except (V3NodeError, V3CandidateError) as error:
+        # A deterministic candidate is held to the same staged validation gate
+        # as model candidates.  Preserve its exact rejection as evidence for a
+        # subsequent reasoning lane rather than silently discarding it.
+        deterministic = None
+        deterministic_rejection = str(error)
+    if deterministic:
+        return deterministic
     evidence = format_execution_observation(execution) if execution else "No sandbox execution yet."
     acceptance_text = json.dumps(acceptance_issues or [], ensure_ascii=False, indent=2)
     harness_text = "\n".join("- " + item for item in harness_diagnostics) or "none"
@@ -692,7 +1025,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         "You are ATLAS v3 REPAIR, a senior Node.js engineer. Repair the current project as one coherent bounded change-set using real sandbox evidence. "
         "Do not rewrite the whole project without cause. Preserve working APIs, requested dependencies, and valid test semantics. "
         + (
-            "You MAY repair test harness/import/assertion mechanics or add missing coverage, but preserve every existing test case and its intended behavior. "
+            "You MAY modify test files only within the explicit TEST REPAIR AUTHORITY supplied by ATLAS. Preserve every existing test case, expected error/message, and assertion count; repair mechanics rather than weakening semantics. "
             if allow_tests
             else
             "Test files are protected specifications in this repair cycle; do not modify them. "
@@ -707,6 +1040,8 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         + "\n\nPROJECT SPEC:\n" + json.dumps(spec, ensure_ascii=False, indent=2)
         + "\n\nLATEST AUTHORITATIVE SANDBOX EVIDENCE:\n" + evidence[-7000:]
         + "\n\nDETERMINISTIC TEST-HARNESS DIAGNOSTICS:\n" + harness_text
+        + "\n\nTEST REPAIR AUTHORITY:\n" + json.dumps(test_authority, ensure_ascii=False, indent=2)[:5000]
+        + "\n\nDETERMINISTIC CANDIDATE REJECTION (if any):\n" + str(deterministic_rejection or "none")[:3000]
         + "\n\nRECENT REPAIR HISTORY / OUTCOMES:\n" + history_text
         + "\n\nFINAL ACCEPTANCE ISSUES (if verification already passed):\n" + acceptance_text[:4000]
         + "\n\nCURRENT WORKSPACE:\n" + _workspace_sources(run, budget=19000, per_file=6500)
@@ -725,6 +1060,8 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
                 system_prompt=system,
                 user_prompt=user + (f"\n\nPREVIOUS CANDIDATE REJECTION:\n{last_error}" if last_error else ""),
                 tier=("reasoning" if attempt >= 1 and tier == "worker" else tier),
+                schema=REPAIR_ACTION_SCHEMA,
+                schema_name="node_repair_action_v1",
             )
             files = _parse_file_set(
                 {"changes": data.get("changes") or data.get("files") or []},
@@ -750,9 +1087,12 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
 
             return {
                 "model": model,
+                "lane": "model_reasoning",
                 "diagnosis": str(data.get("diagnosis") or "")[:3000],
                 "hypothesis": str(data.get("hypothesis") or data.get("diagnosis") or "")[:2000],
                 "harness_diagnostics": harness_diagnostics,
+                "test_repair_authority": test_authority,
+                "deterministic_rejection": deterministic_rejection,
                 "preflight": preflight,
                 "changed": _apply_files(run, files),
             }
@@ -761,7 +1101,13 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
     raise V3NodeError("Repair could not produce a validated change-set: " + str(last_error or "unknown error"))
 
 
-def inject_intentional_defect(run, spec):
+def inject_intentional_defect(run, spec, baseline_execution=None):
+    """Prepare one proven failing implementation mutant for a requested demo.
+
+    The primary lane is deterministic mutation testing.  A model is consulted
+    only when no safe deterministic operator matches the target, and even then
+    its proposal must fail in staged sandbox execution before durable promotion.
+    """
     implementation = [
         name for name in _workspace_names(run)
         if name.lower().endswith((".js", ".mjs", ".cjs"))
@@ -769,30 +1115,116 @@ def inject_intentional_defect(run, spec):
         and ".test." not in name.lower()
         and ".spec." not in name.lower()
     ]
+    target = str(spec.get("intentional_defect_target") or "").strip()
+    if target:
+        matched = [name for name in implementation if name.lower() == target.lower()]
+        if not matched:
+            raise V3NodeError(
+                f"Goal requires the controlled defect in {target}, but that implementation file is not present/eligible."
+            )
+        implementation = matched
     if not implementation:
-        raise V3NodeError("Goal requested a fail→repair demonstration but no implementation file can safely receive the deliberate defect.")
+        raise V3NodeError(
+            "Goal requested a fail→repair demonstration but no implementation file can safely receive the deliberate defect."
+        )
+
+    # Prefer deterministic mutation testing: no model latency, no protocol
+    # serialization risk, and the candidate is proven to fail before promotion.
+    deterministic_errors = []
+    for filename in implementation:
+        try:
+            selected = select_failing_node_mutant(
+                run,
+                filename,
+                baseline_execution,
+            )
+            changed = _apply_files(run, selected.get("files") or [])
+            return {
+                "model": "deterministic",
+                "lane": selected.get("lane") or "deterministic_mutation_testing",
+                "operator": selected.get("operator"),
+                "detail": selected.get("detail"),
+                "preflight": selected.get("preflight") or {},
+                "trials": selected.get("trials") or [],
+                "changed": changed,
+            }
+        except V3MutationError as error:
+            deterministic_errors.append(f"{filename}: {error}")
+
+    # Generic fallback for projects where the conservative mutation library has
+    # no matching operator.  This path is deliberately shorter than ordinary
+    # reasoning calls because fault creation is not worth a multi-minute local
+    # inference.  The proposed fault still must be proven in staging before it
+    # can touch the durable workspace.
     system = (
         "You are ATLAS v3 controlled verification setup. The user explicitly requested one deliberate small implementation defect so the real tests fail before repair. "
-        "Modify exactly ONE existing implementation file. Do not change tests, package.json, dependencies, or public architecture. Make the defect simple and localized. "
-        "Return ONLY JSON: {changes:[{filename,content,reason}]}."
+        "Modify exactly ONE existing implementation file. If ATLAS supplies only one allowed file, that is an explicit user target and must be used. "
+        "Do not change tests, package.json, dependencies, imports, exports, or public architecture. Make one syntax-valid localized behavioral defect. "
+        "Return ONLY the structured action requested by the schema."
     )
     user = (
         "GOAL:\n" + str(run.get("goal") or "")
         + "\n\nALLOWED IMPLEMENTATION FILES:\n" + "\n".join("- " + name for name in implementation)
+        + "\n\nDETERMINISTIC MUTATION RESULT:\n"
+        + ("\n".join("- " + item for item in deterministic_errors) or "No deterministic operator matched.")
         + "\n\nCURRENT WORKSPACE:\n" + _workspace_sources(run, budget=16000, per_file=6000)
     )
-    data, model = run_json(
-        run,
-        phase="intentional_defect",
-        purpose="v3_intentional_defect",
-        system_prompt=system,
-        user_prompt=user,
-        tier="worker",
+    try:
+        data, model = run_json(
+            run,
+            phase="intentional_defect",
+            purpose="v3_intentional_defect_fallback",
+            system_prompt=system,
+            user_prompt=user,
+            tier="worker",
+            total_timeout_seconds=120,
+            schema=DEFECT_ACTION_SCHEMA,
+            schema_name="node_intentional_defect_action_v1",
+        )
+    except V3ModelError as error:
+        raise V3NodeError(
+            "Controlled defect preparation could not find a deterministic failing mutant, and the bounded model fallback did not complete: "
+            + str(error)
+        ) from error
+
+    files = _parse_file_set(
+        {"changes": data.get("changes") or []},
+        spec,
+        require_all_explicit=False,
+        allow_test_changes=False,
     )
-    files = _parse_file_set({"changes": data.get("changes") or []}, spec, require_all_explicit=False, allow_test_changes=False)
     if len(files) != 1 or files[0]["filename"] not in implementation:
-        raise V3NodeError("Intentional-defect stage must modify exactly one existing implementation file.")
-    return {"model": model, "changed": _apply_files(run, files)}
+        raise V3NodeError(
+            "Intentional-defect fallback must modify exactly one existing implementation file."
+        )
+
+    try:
+        preflight = validate_candidate(
+            run,
+            files,
+            baseline_execution=None,
+            purpose="intentional_defect:model_fallback",
+        )
+    except V3CandidateError as error:
+        raise V3NodeError(
+            "Intentional-defect fallback candidate failed staged validation: " + str(error)
+        ) from error
+
+    staged_execution = preflight.get("execution") or {}
+    if not is_legitimate_failing_execution(staged_execution):
+        raise V3NodeError(
+            "Intentional-defect fallback candidate was not promoted because staged tests did not produce a real failure."
+        )
+
+    return {
+        "model": model,
+        "lane": "model_fallback_staged",
+        "operator": "model_proposed",
+        "detail": "Model fallback produced a staged/proven failing implementation mutation.",
+        "preflight": preflight,
+        "trials": [],
+        "changed": _apply_files(run, files),
+    }
 
 
 
@@ -844,10 +1276,16 @@ def _hard_acceptance(run, spec, verified):
             issues.append({"type": "dependency_not_used", "item": dependency})
 
     if spec.get("forbid_external_dependencies") and deps:
-        issues.append({
-            "type": "forbidden_dependency",
-            "item": ", ".join(sorted(deps.keys())[:20]),
-        })
+        # "No external dependencies" means no dependencies beyond packages the
+        # user explicitly required. A required package can never simultaneously
+        # be classified as forbidden by the same user-owned contract.
+        allowed = {str(item).lower() for item in (spec.get("required_dependencies") or [])}
+        forbidden = sorted(name for name in deps.keys() if name not in allowed)
+        if forbidden:
+            issues.append({
+                "type": "forbidden_dependency",
+                "item": ", ".join(forbidden[:20]),
+            })
 
     scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
     for script in spec.get("required_scripts") or []:
@@ -863,14 +1301,20 @@ def _hard_acceptance(run, spec, verified):
         issues.append({"type": "verification_required", "item": "sandbox"})
 
     if spec.get("requires_fail_then_repair"):
-        executions = list_agent_sandbox_executions(run["user_id"], run["id"], limit=100)
-        had_real_failure = any(
-            str(item.get("runtime") or "") == "node"
-            and str(item.get("status") or "") in {"failed", "timeout"}
-            for item in executions
-        )
-        if not had_real_failure:
-            issues.append({"type": "required_failure_not_observed", "item": "fail_then_repair"})
+        try:
+            from app.services.agent_v3_storage import demonstration_status
+            demo = demonstration_status(run["user_id"], run["id"])
+        except Exception:
+            demo = {"satisfied": False}
+        if not demo.get("satisfied"):
+            issues.append({
+                "type": "required_failure_not_observed",
+                "item": "fail_then_repair",
+                "detail": (
+                    "ATLAS requires lifecycle-owned evidence of baseline pass → controlled defect → observed failure → repaired pass. "
+                    "Ordinary bootstrap or accidental repair failures do not satisfy this demonstration."
+                ),
+            })
 
     return issues, tests
 
