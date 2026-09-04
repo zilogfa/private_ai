@@ -323,7 +323,21 @@ def validate_candidate(run, changes, *, baseline_execution=None, purpose="repair
     progress = None
     accepted = True
     detail = "Candidate passed structural staging validation."
-    if purpose == "repair" and baseline_execution and execution.get("status") != "skipped":
+    if purpose == "contract_convergence":
+        # A contract-convergence candidate may intentionally turn a misleading
+        # green command into a truthful failing test suite. Example: replacing
+        # console-only pseudo-tests with real node:test registrations can expose
+        # latent implementation defects.  The adapter has already proven that
+        # the candidate advances a specific original-goal contract metric, so
+        # ordinary runtime regression scoring must not veto that truthful step.
+        if execution.get("status") == "skipped":
+            detail = "Contract-convergence candidate passed structural staging; runtime preflight was deferred."
+        else:
+            detail = (
+                "Contract-convergence candidate executed in staging. Runtime failure is allowed when the "
+                "candidate measurably strengthens the original user contract; subsequent baseline repair owns any exposed defect."
+            )
+    elif purpose == "repair" and baseline_execution and execution.get("status") != "skipped":
         comparable_execution = dict(execution)
         # Candidate preflight is a different control-plane action, but progress
         # comparison must fingerprint the project failure itself rather than the

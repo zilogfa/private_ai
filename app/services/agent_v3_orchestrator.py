@@ -39,6 +39,7 @@ from app.services.agent_v3_node_adapter import (
     bootstrap_project,
     ensure_environment,
     evaluate_acceptance,
+    evaluate_baseline_acceptance,
     execution_passed,
     failure_fingerprint,
     inject_intentional_defect,
@@ -204,6 +205,8 @@ def _repair_campaign_key(run, spec, execution, acceptance=None):
     ):
         return "demonstration"
     if execution_passed(execution) and acceptance and (acceptance.get("repairable_issues") or []):
+        if spec.get("requires_fail_then_repair") and not demo.get("defect_injected"):
+            return "baseline_acceptance"
         return "acceptance"
     return "baseline"
 
@@ -377,6 +380,20 @@ def execute_v3_agent_run(user_id, run_id):
                     "Candidate preflight: " + str(preflight_exec.get("status") or "structural-only")
                     + (" · " + str(preflight.get("detail")) if preflight.get("detail") else ""),
                 ]
+                gaps = list(holder["build"].get("contract_gaps") or [])
+                if gaps:
+                    gap_text = ", ".join(
+                        (
+                            f"{item.get('type')}({item.get('actual')}/{item.get('required')})"
+                            if item.get("required") is not None
+                            else str(item.get("type") or "contract_gap")
+                        )
+                        for item in gaps[:8]
+                    )
+                    lines.append(
+                        "Deferred baseline contract gaps: " + gap_text
+                        + ". VERIFY + baseline contract convergence will close these before any controlled defect is injected."
+                    )
                 return {"output": "\n".join(lines)}
 
             result = _phase(
@@ -477,83 +494,130 @@ def execute_v3_agent_run(user_id, run_id):
                         execution_status=str(execution.get("status") or "failed"),
                     )
 
+            baseline_blocked = False
             if execution_passed(execution) and spec.get("requires_fail_then_repair"):
                 demo = demonstration_status(user_id, run_id)
                 if not demo.get("defect_injected"):
-                    # A green execution here is the intended-correct baseline.
-                    # Only now may ATLAS perform the user's explicit controlled
-                    # fail→repair demonstration. Ordinary bootstrap/repair
-                    # failures never count as that requested demonstration.
-                    if not demo.get("baseline_verified"):
-                        record_demonstration_event(
-                            _fresh_run(run),
-                            "baseline_verified",
-                            detail="Authoritative Node verification passed before controlled defect injection.",
-                            execution_status="success",
-                        )
-                    defect_holder = {}
+                    # A green process/test result is necessary but not sufficient
+                    # to establish the intended-correct baseline. Before ATLAS
+                    # deliberately damages the project, every original-goal user
+                    # deliverable must already be satisfied. Only lifecycle-owned
+                    # fail→repair evidence is deferred at this gate.
+                    baseline_holder = {}
 
-                    def do_defect(_step):
-                        defect_holder["result"] = inject_intentional_defect(
-                            _fresh_run(run),
-                            spec,
-                            baseline_execution=execution,
+                    def do_baseline_acceptance(_step):
+                        baseline_holder["value"] = evaluate_baseline_acceptance(
+                            _fresh_run(run), spec, execution
                         )
-                        changed = defect_holder["result"].get("changed") or []
-                        record_demonstration_event(
-                            _fresh_run(run),
-                            "defect_injected",
-                            detail="Controlled implementation-only defect: "
-                            + ", ".join(item.get("filename") for item in changed),
+                        value = baseline_holder["value"]
+                        prefix = (
+                            "Baseline contract readiness: SATISFIED.\n"
+                            if value.get("satisfied")
+                            else "Baseline contract readiness: INCOMPLETE.\n"
                         )
-                        preflight = defect_holder["result"].get("preflight") or {}
-                        preflight_execution = preflight.get("execution") or {}
                         return {
-                            "output": (
-                                "Baseline verification passed. User-requested controlled fail→repair demonstration prepared.\n"
-                                f"Injection lane: {defect_holder['result'].get('lane') or 'unknown'}\n"
-                                f"Mutation operator: {defect_holder['result'].get('operator') or 'unknown'}\n"
-                                f"Staged proof: {preflight_execution.get('status') or 'unknown'}"
-                                + (f" · exit code {preflight_execution.get('exit_code')}" if preflight_execution.get("exit_code") is not None else "")
-                                + "\nChanged file: " + ", ".join(item.get("filename") for item in changed)
-                            )
+                            "output": prefix
+                            + "Fail→repair demonstration evidence is intentionally deferred until after this gate.\n"
+                            + acceptance_summary(value)
                         }
 
                     result = _phase(
                         run,
-                        "intentional_defect",
-                        "A clean baseline is now proven. Introduce exactly one controlled implementation-only defect for the user's requested fail→repair demonstration.",
-                        do_defect,
-                        action="intentional_defect",
+                        "baseline_acceptance",
+                        "Prove the intended-correct baseline satisfies the original user contract before any controlled defect is injected; defer only lifecycle-owned fail→repair evidence.",
+                        do_baseline_acceptance,
+                        action="baseline_acceptance",
                     )
                     if result.get("paused"):
                         return
 
-                    verification = {}
-                    result = _phase(
-                        run,
-                        "verify",
-                        "Observe the controlled defect as a real authoritative sandbox failure before allowing repair.",
-                        do_verify,
-                        action="verify",
-                        tool_name="docker/node",
-                    )
-                    if result.get("paused"):
-                        return
-                    execution = verification["execution"]
-                    if execution_passed(execution):
-                        raise V3OrchestratorError(
-                            "The controlled demonstration defect did not produce a failing authoritative verification. "
-                            "ATLAS stopped rather than falsely claiming the required fail→repair evidence."
-                        )
-                    record_demonstration_event(
+                    baseline_acceptance = baseline_holder["value"]
+                    record_phase_event(
                         _fresh_run(run),
-                        "failure_observed",
-                        detail="Controlled defect produced an authoritative failing Node verification.",
-                        execution_status=str(execution.get("status") or "failed"),
+                        "baseline_acceptance",
+                        "satisfied" if baseline_acceptance.get("satisfied") else "incomplete",
+                        acceptance_summary(baseline_acceptance),
                     )
-                    acceptance = None
-                    # Continue into the ordinary evidence-driven repair governor.
+
+                    if not baseline_acceptance.get("satisfied"):
+                        acceptance = baseline_acceptance
+                        baseline_blocked = True
+                        if not (baseline_acceptance.get("repairable_issues") or []):
+                            raise V3OrchestratorError(
+                                "ATLAS v3 baseline contract gate stopped before controlled fault injection because the original user contract is not yet satisfied and the remaining blocker is not project-repairable. "
+                                + acceptance_summary(baseline_acceptance)
+                            )
+                    else:
+                        if not demo.get("baseline_verified"):
+                            record_demonstration_event(
+                                _fresh_run(run),
+                                "baseline_verified",
+                                detail="Authoritative verification and baseline user-contract readiness both passed before controlled defect injection.",
+                                execution_status="success",
+                            )
+                        defect_holder = {}
+
+                        def do_defect(_step):
+                            defect_holder["result"] = inject_intentional_defect(
+                                _fresh_run(run),
+                                spec,
+                                baseline_execution=execution,
+                            )
+                            changed = defect_holder["result"].get("changed") or []
+                            record_demonstration_event(
+                                _fresh_run(run),
+                                "defect_injected",
+                                detail="Controlled implementation-only defect: "
+                                + ", ".join(item.get("filename") for item in changed),
+                            )
+                            preflight = defect_holder["result"].get("preflight") or {}
+                            preflight_execution = preflight.get("execution") or {}
+                            return {
+                                "output": (
+                                    "Baseline verification and original user-contract readiness passed. User-requested controlled fail→repair demonstration prepared.\n"
+                                    f"Injection lane: {defect_holder['result'].get('lane') or 'unknown'}\n"
+                                    f"Mutation operator: {defect_holder['result'].get('operator') or 'unknown'}\n"
+                                    f"Staged proof: {preflight_execution.get('status') or 'unknown'}"
+                                    + (f" · exit code {preflight_execution.get('exit_code')}" if preflight_execution.get("exit_code") is not None else "")
+                                    + "\nChanged file: " + ", ".join(item.get("filename") for item in changed)
+                                )
+                            }
+
+                        result = _phase(
+                            run,
+                            "intentional_defect",
+                            "A clean, contract-complete baseline is proven. Introduce exactly one controlled implementation-only defect for the user's requested fail→repair demonstration.",
+                            do_defect,
+                            action="intentional_defect",
+                        )
+                        if result.get("paused"):
+                            return
+
+                        verification = {}
+                        result = _phase(
+                            run,
+                            "verify",
+                            "Observe the controlled defect as a real authoritative sandbox failure before allowing repair.",
+                            do_verify,
+                            action="verify",
+                            tool_name="docker/node",
+                        )
+                        if result.get("paused"):
+                            return
+                        execution = verification["execution"]
+                        if execution_passed(execution):
+                            raise V3OrchestratorError(
+                                "The controlled demonstration defect did not produce a failing authoritative verification. "
+                                "ATLAS stopped rather than falsely claiming the required fail→repair evidence."
+                            )
+                        record_demonstration_event(
+                            _fresh_run(run),
+                            "failure_observed",
+                            detail="Controlled defect produced an authoritative failing Node verification.",
+                            execution_status=str(execution.get("status") or "failed"),
+                        )
+                        acceptance = None
+                        # Continue into the evidence-driven demonstration campaign.
 
                 elif demo.get("failure_observed") and not demo.get("repair_verified"):
                     # Reaching a green execution after the controlled failure
@@ -565,7 +629,7 @@ def execute_v3_agent_run(user_id, run_id):
                         execution_status="success",
                     )
 
-            if execution_passed(execution):
+            if execution_passed(execution) and not baseline_blocked:
                 acceptance_holder = {}
 
                 def do_acceptance(_step):
@@ -664,6 +728,12 @@ def execute_v3_agent_run(user_id, run_id):
                     f"{item.get('filename')}:{item.get('scope')}[{','.join(item.get('kinds') or [])}]"
                     for item in authority
                 ) or "none"
+                contract_progress = repair_holder["result"].get("contract_progress") or {}
+                contract_line = (
+                    "\nContract convergence: " + str(contract_progress.get("detail"))
+                    if contract_progress.get("improved")
+                    else ""
+                )
                 return {
                     "output": (
                         f"Committed repair {next_lifetime_repair} (campaign {campaign_key} {next_campaign_repair}).\n"
@@ -674,6 +744,7 @@ def execute_v3_agent_run(user_id, run_id):
                         f"Hypothesis: {repair_holder['result'].get('hypothesis') or 'not supplied'}\n"
                         f"Staged candidate preflight: {preflight_exec.get('status') or 'structural-only'}"
                         + (f" · {preflight.get('detail')}" if preflight.get("detail") else "")
+                        + contract_line
                         + "\nChanged files: " + ", ".join(item.get("filename") for item in changed)
                     )
                 }
@@ -735,6 +806,18 @@ def execute_v3_agent_run(user_id, run_id):
             acceptance = None
 
             progress = compare_evidence(before_execution, execution)
+            contract_progress = repair_holder["result"].get("contract_progress") or {}
+            if contract_progress.get("improved"):
+                # Contract convergence is an orthogonal form of engineering
+                # progress.  A truthful test-suite upgrade may expose latent
+                # implementation failures and therefore look like a runtime
+                # regression even though it strengthened the original user
+                # contract. Preserve runtime evidence but classify the repair
+                # by the contract metric it was explicitly authorized to move.
+                progress = dict(progress)
+                progress["classification"] = "contract_progress"
+                progress["reason"] = str(contract_progress.get("detail") or "Original user contract measurably improved.")
+                progress["contract_progress"] = dict(contract_progress)
             record_repair_outcome(
                 _fresh_run(run),
                 repair_number=lifetime_committed_repairs,

@@ -276,10 +276,10 @@ def repair_permission(committed_repairs, outcomes=None):
 
     latest = outcomes[-1] if outcomes else {}
     latest_class = str(latest.get("progress_class") or latest.get("classification") or "")
-    if latest_class in {"strong_progress", "changed_failure"}:
+    if latest_class in {"strong_progress", "changed_failure", "contract_progress"}:
         return {
             "allowed": True,
-            "reason": "Latest committed repair made measurable progress, so ATLAS granted a bounded progress extension.",
+            "reason": "Latest committed repair made measurable runtime or contract progress, so ATLAS granted a bounded progress extension.",
             "lane": "progress_extension",
         }
 

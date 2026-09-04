@@ -537,6 +537,33 @@ def _apply_files(run, files):
     return changed
 
 
+
+def _initial_build_contract_gaps(files, spec):
+    """Return user-contract gaps that BUILD may defer to convergence.
+
+    BUILD owns coherent project construction, not final goal acceptance.  A
+    structurally valid initial project may therefore be committed even when a
+    deterministic user-contract requirement such as minimum test count is not
+    complete yet.  VERIFY + the baseline contract gate own that convergence.
+    """
+    gaps = []
+    test_count = 0
+    for item in files or []:
+        lower = str(item.get("filename") or "").lower()
+        if lower.startswith("test") or ".test." in lower or ".spec." in lower:
+            test_count += len(_test_names_from_source(item.get("content") or ""))
+
+    minimum = int(spec.get("min_tests") or 0)
+    if minimum and test_count < minimum:
+        gaps.append({
+            "type": "insufficient_tests",
+            "required": minimum,
+            "actual": test_count,
+            "owner": "baseline_contract_gate",
+        })
+    return gaps
+
+
 def bootstrap_project(run, spec):
     system = (
         "You are ATLAS v3 BUILD, a senior Node.js engineer. Construct one coherent initial project from the goal/spec. "
@@ -569,18 +596,12 @@ def bootstrap_project(run, spec):
                 schema_name="node_build_action_v1",
             )
             files = _parse_file_set(data, spec, require_all_explicit=True, allow_test_changes=True)
-            # A minimum test count is structural enough to repair internally on bootstrap,
-            # but behavior-name semantics are intentionally NOT a build gate.
-            test_count = 0
-            for item in files:
-                lower = item["filename"].lower()
-                if lower.startswith("test") or ".test." in lower or ".spec." in lower:
-                    test_count += len(_test_names_from_source(item["content"]))
-            minimum = int(spec.get("min_tests") or 0)
-            if minimum and test_count < minimum:
-                raise V3NodeError(
-                    f"Initial build defines {test_count} tests but the explicit goal requires at least {minimum}."
-                )
+            # BUILD is a construction gate, not final acceptance. Deterministic
+            # user-contract gaps (for example 5 tests when the goal requires 6)
+            # are recorded and converged after real execution evidence exists.
+            # This prevents a nearly-complete model candidate from being thrown
+            # away before ATLAS can use its normal verify/repair machinery.
+            contract_gaps = _initial_build_contract_gaps(files, spec)
             preflight = validate_candidate(
                 run,
                 files,
@@ -592,6 +613,7 @@ def bootstrap_project(run, spec):
                 "summary": str(data.get("summary") or "Initial Node project constructed."),
                 "files": files,
                 "preflight": preflight,
+                "contract_gaps": contract_gaps,
                 "changed": _apply_files(run, files),
             }
         except (V3ModelError, V3NodeError, V3CandidateError) as error:
@@ -756,11 +778,22 @@ def _test_repair_authority(run, spec, execution=None, acceptance_issues=None):
 
     # Coverage creation is a separate authority. It is not mechanics-only, but
     # the semantic-preservation gate still prevents deleting established cases.
+    # Grant this authority to actual/required test files rather than using a
+    # global wildcard.  A coverage gap must never authorize an unrelated
+    # implementation rewrite merely because tests are incomplete.
+    test_targets = [name for name in _workspace_names(run) if _is_test_filename(name)]
+    if not test_targets:
+        test_targets = [
+            str(name) for name in (spec.get("required_files") or [])
+            if _is_test_filename(name)
+        ]
     if len(_test_names(run)) < int(spec.get("min_tests") or 0):
-        permissions.append({"filename": "*", "scope": "coverage_addition", "kinds": ["insufficient_tests"], "implicated_lines": []})
+        for filename in (test_targets or ["test.js"]):
+            permissions.append({"filename": filename, "scope": "coverage_addition", "kinds": ["insufficient_tests"], "implicated_lines": []})
     for issue in acceptance_issues or []:
         if str(issue.get("type") or "") in {"behavior_unmet", "insufficient_tests"}:
-            permissions.append({"filename": "*", "scope": "coverage_addition", "kinds": [str(issue.get("type"))], "implicated_lines": []})
+            for filename in (test_targets or ["test.js"]):
+                permissions.append({"filename": filename, "scope": "coverage_addition", "kinds": [str(issue.get("type"))], "implicated_lines": []})
 
     # Deduplicate while preserving diagnostic order.
     result = []
@@ -776,6 +809,118 @@ def _test_repair_authority(run, spec, execution=None, acceptance_issues=None):
 
 def _repair_allowed_test_files(run, spec, execution=None, acceptance_issues=None):
     return bool(_test_repair_authority(run, spec, execution, acceptance_issues))
+
+
+def _acceptance_repair_directive(run, spec, acceptance_issues=None):
+    """Return a bounded source-authority directive for contract convergence.
+
+    A green process result does not authorize arbitrary source edits when the
+    persistent user contract is still incomplete.  In particular, an
+    ``insufficient_tests`` blocker is owned by the test contract: implementation
+    files may not be rewritten to chase an already-green sandbox result.
+    """
+    issues = [dict(item) for item in (acceptance_issues or []) if isinstance(item, dict)]
+    types = {str(item.get("type") or "") for item in issues if str(item.get("type") or "")}
+    if not issues:
+        return {"kind": "runtime_repair", "allowed_files": [], "issues": []}
+
+    if types and types <= {"insufficient_tests"}:
+        targets = [name for name in _workspace_names(run) if _is_test_filename(name)]
+        if not targets:
+            targets = [
+                str(name) for name in (spec.get("required_files") or [])
+                if _is_test_filename(name)
+            ]
+        return {
+            "kind": "test_contract_convergence",
+            "allowed_files": targets or ["test.js"],
+            "issues": issues,
+            "current_test_count": len(_test_names(run)),
+            "required_test_count": int(spec.get("min_tests") or 0),
+            "instruction": (
+                "Close the persistent test-coverage contract only. Modify test files, not implementation files. "
+                "Register real Node built-in test cases (node:test test()/it() semantics) and use real assertions. "
+                "Top-level scripts or console messages such as 'Test N passed' do not count as registered tests. "
+                "It is acceptable for truthful newly-registered tests to expose a latent implementation failure; "
+                "that failure belongs to the subsequent baseline repair campaign."
+            ),
+        }
+
+    manifest_types = {"invalid_package_json", "missing_dependency", "forbidden_dependency", "missing_script"}
+    if types and types <= manifest_types:
+        return {
+            "kind": "manifest_contract_convergence",
+            "allowed_files": ["package.json"],
+            "issues": issues,
+            "instruction": "Repair only package.json contract metadata required by the listed acceptance blockers.",
+        }
+
+    return {
+        "kind": "general_acceptance_convergence",
+        "allowed_files": [],
+        "issues": issues,
+        "instruction": "Address only the listed original-goal acceptance blockers; avoid unrelated rewrites.",
+    }
+
+
+def _projected_test_count(run, changes):
+    """Count semantic Node test registrations after overlaying a candidate."""
+    changed = {str(item.get("filename") or ""): str(item.get("content") or "") for item in (changes or [])}
+    names = set(_workspace_names(run)) | set(changed)
+    total = 0
+    for filename in names:
+        if not _is_test_filename(filename):
+            continue
+        source = changed.get(filename)
+        if source is None:
+            try:
+                source = read_workspace_file(run["user_id"], run["id"], filename, max_chars=70000)
+            except Exception:
+                source = ""
+        total += len(_test_names_from_source(source))
+    return total
+
+
+def _validate_acceptance_repair_scope(run, spec, files, directive):
+    """Ensure an acceptance repair actually moves the contract it owns."""
+    directive = dict(directive or {})
+    kind = str(directive.get("kind") or "runtime_repair")
+    allowed = {str(name).lower() for name in (directive.get("allowed_files") or []) if str(name)}
+    changed = [str(item.get("filename") or "") for item in (files or [])]
+
+    if allowed:
+        unrelated = [name for name in changed if name.lower() not in allowed]
+        if unrelated:
+            raise V3NodeError(
+                f"Contract-directed repair scope {kind} does not authorize unrelated file(s): "
+                + ", ".join(unrelated)
+            )
+
+    if kind == "test_contract_convergence":
+        non_tests = [name for name in changed if not _is_test_filename(name)]
+        if non_tests:
+            raise V3NodeError(
+                "Insufficient-test convergence may modify only test files; candidate changed: "
+                + ", ".join(non_tests)
+            )
+        before = int(directive.get("current_test_count") or len(_test_names(run)))
+        after = _projected_test_count(run, files)
+        required = int(directive.get("required_test_count") or spec.get("min_tests") or 0)
+        if after <= before:
+            raise V3NodeError(
+                f"Test-contract candidate did not increase registered Node test coverage ({before} -> {after}; required {required}). "
+                "Use actual node:test test()/it() registrations rather than console-only checks."
+            )
+        return {
+            "kind": kind,
+            "improved": True,
+            "before_test_count": before,
+            "after_test_count": after,
+            "required_test_count": required,
+            "detail": f"Registered Node test coverage improved {before} -> {after} (required {required}).",
+        }
+
+    return {"kind": kind, "improved": False}
 
 def _node_package_type(run):
     try:
@@ -992,6 +1137,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         execution=execution,
         acceptance_issues=acceptance_issues,
     )
+    repair_directive = _acceptance_repair_directive(run, spec, acceptance_issues)
     allow_tests = bool(test_authority)
     deterministic_rejection = None
     try:
@@ -1032,6 +1178,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         )
         + "Do not repeat an already-attempted hypothesis against materially unchanged evidence; use the repair history to choose a new explanation when needed. "
         + "Do not change package.json unless sandbox evidence or an acceptance issue actually requires a manifest/script/dependency change. "
+        + "When ATLAS supplies a CONTRACT-DIRECTED REPAIR SCOPE, that scope is authoritative: address that contract gap only and do not edit unrelated files simply because the current sandbox command is green. "
         + "Return ONLY JSON: {diagnosis,hypothesis,changes:[{filename,content,reason}]}. Each content is the COMPLETE file. "
         + "For a .json file, content may be either the complete JSON string or a JSON object/array; ATLAS canonicalizes it."
     )
@@ -1044,6 +1191,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         + "\n\nDETERMINISTIC CANDIDATE REJECTION (if any):\n" + str(deterministic_rejection or "none")[:3000]
         + "\n\nRECENT REPAIR HISTORY / OUTCOMES:\n" + history_text
         + "\n\nFINAL ACCEPTANCE ISSUES (if verification already passed):\n" + acceptance_text[:4000]
+        + "\n\nCONTRACT-DIRECTED REPAIR SCOPE:\n" + json.dumps(repair_directive, ensure_ascii=False, indent=2)[:5000]
         + "\n\nCURRENT WORKSPACE:\n" + _workspace_sources(run, budget=19000, per_file=6500)
     )
 
@@ -1077,12 +1225,20 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
                     raise V3NodeError("Repair attempted to invent an unrelated new file: " + item["filename"])
 
             _validate_test_change_integrity(run, spec, files)
+            contract_progress = _validate_acceptance_repair_scope(
+                run, spec, files, repair_directive
+            )
             files = _filter_noop_changes(run, files)
+            preflight_purpose = (
+                "contract_convergence"
+                if bool(contract_progress.get("improved"))
+                else "repair"
+            )
             preflight = validate_candidate(
                 run,
                 files,
                 baseline_execution=execution,
-                purpose="repair",
+                purpose=preflight_purpose,
             )
 
             return {
@@ -1093,6 +1249,8 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
                 "harness_diagnostics": harness_diagnostics,
                 "test_repair_authority": test_authority,
                 "deterministic_rejection": deterministic_rejection,
+                "repair_directive": repair_directive,
+                "contract_progress": contract_progress,
                 "preflight": preflight,
                 "changed": _apply_files(run, files),
             }
@@ -1502,6 +1660,26 @@ def evaluate_acceptance(run, spec, execution):
             platform_checks=platform_checks,
             notes="Semantic user-deliverable acceptance model was unavailable.",
         )
+
+
+
+def evaluate_baseline_acceptance(run, spec, execution):
+    """Evaluate intended-correct baseline readiness before fault injection.
+
+    When the user explicitly requested a fail→repair demonstration, that
+    lifecycle-owned evidence cannot exist until after a clean baseline has been
+    proven.  The baseline gate therefore evaluates the complete original user
+    contract with only ``requires_fail_then_repair`` deferred.  Missing files,
+    dependencies, test coverage and semantic behaviors remain fully enforced.
+    """
+    baseline_spec = dict(spec or {})
+    baseline_spec["requires_fail_then_repair"] = False
+    result = evaluate_acceptance(run, baseline_spec, execution)
+    result["baseline_gate"] = True
+    result["deferred_lifecycle_requirements"] = (
+        ["fail_then_repair"] if bool((spec or {}).get("requires_fail_then_repair")) else []
+    )
+    return result
 
 
 def acceptance_summary(acceptance):
