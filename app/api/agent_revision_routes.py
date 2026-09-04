@@ -16,6 +16,9 @@ from app.services.agent_revision import (
     begin_user_revision,
     list_run_revisions,
 )
+from app.services.agent_v3_revision_governance import (
+    reconcile_before_new_revision,
+)
 
 
 agent_revision_api_bp = Blueprint(
@@ -90,6 +93,15 @@ def revise(
     payload = _payload()
 
     try:
+        # v3 terminal failures used to leave the current revision marked
+        # "running", which made the next Continue / Revise impossible.  Repair
+        # that stale lifecycle state transactionally before opening the new
+        # feedback revision. Active runs are deliberately left untouched.
+        reconcile_before_new_revision(
+            user_id,
+            run_id,
+        )
+
         result = begin_user_revision(
             user_id,
             run_id,
