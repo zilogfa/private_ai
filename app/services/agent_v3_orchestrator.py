@@ -728,6 +728,12 @@ def execute_v3_agent_run(user_id, run_id):
                     f"{item.get('filename')}:{item.get('scope')}[{','.join(item.get('kinds') or [])}]"
                     for item in authority
                 ) or "none"
+                mutation_authority = repair_holder["result"].get("repair_authority") or {}
+                mutation_line = (
+                    f"\nMutation authority: {mutation_authority.get('kind') or 'unknown'}; "
+                    f"allowed={','.join(mutation_authority.get('allowed_files') or []) or 'none'}; "
+                    f"preferred={','.join(mutation_authority.get('preferred_files') or []) or 'none'}"
+                )
                 contract_progress = repair_holder["result"].get("contract_progress") or {}
                 contract_line = (
                     "\nContract convergence: " + str(contract_progress.get("detail"))
@@ -739,8 +745,9 @@ def execute_v3_agent_run(user_id, run_id):
                         f"Committed repair {next_lifetime_repair} (campaign {campaign_key} {next_campaign_repair}).\n"
                         f"Governor lane: {permission.get('lane')}.\n"
                         f"Repair lane: {repair_holder['result'].get('lane') or 'model_reasoning'}\n"
-                        f"Test repair authority: {authority_text}\n"
-                        f"Model: {repair_holder['result'].get('model')}\n"
+                        f"Test repair authority: {authority_text}"
+                        + mutation_line + "\n"
+                        + f"Model: {repair_holder['result'].get('model')}\n"
                         f"Hypothesis: {repair_holder['result'].get('hypothesis') or 'not supplied'}\n"
                         f"Staged candidate preflight: {preflight_exec.get('status') or 'structural-only'}"
                         + (f" · {preflight.get('detail')}" if preflight.get("detail") else "")

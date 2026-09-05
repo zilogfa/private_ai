@@ -158,6 +158,7 @@ def _stream_once(
     total_timeout_seconds,
     prompt_budget_chars,
     format_spec,
+    think_mode=None,
 ):
     """One physical Ollama generation with telemetry."""
     system_prompt, user_prompt = _fit_prompt(
@@ -176,6 +177,11 @@ def _stream_once(
         "keep_alive": V3_KEEP_ALIVE,
         "options": {"num_ctx": V3_CONTEXT_SIZE, "temperature": 0},
     }
+    # Ollama thinking-capable models default to their own thinking policy when
+    # this field is omitted.  ATLAS sets it only for phases that explicitly own
+    # a thinking budget (v3.14 repair lanes and protocol serialization).
+    if think_mode is not None:
+        payload["think"] = think_mode
 
     started = time.monotonic()
     pieces = []
@@ -302,6 +308,7 @@ def _protocol_repair(
         total_timeout_seconds=V3_PROTOCOL_REPAIR_TIMEOUT_SECONDS,
         prompt_budget_chars=V3_PROMPT_CHAR_BUDGET,
         format_spec=_schema_format(schema),
+        think_mode=False,
     )
     record_protocol_event(
         run,
@@ -332,6 +339,7 @@ def run_json(
     schema=None,
     schema_name=None,
     protocol_repair_attempts=None,
+    think_mode=None,
 ):
     """Run one logical structured model action.
 
@@ -372,6 +380,7 @@ def run_json(
             total_timeout_seconds=timeout_total,
             prompt_budget_chars=prompt_budget_chars,
             format_spec=format_spec,
+            think_mode=think_mode,
         )
     except V3ModelError as error:
         # Older Ollama versions may support JSON mode but not JSON-schema mode.
@@ -402,6 +411,7 @@ def run_json(
                 total_timeout_seconds=timeout_total,
                 prompt_budget_chars=prompt_budget_chars,
                 format_spec="json",
+                think_mode=think_mode,
             )
         else:
             raise

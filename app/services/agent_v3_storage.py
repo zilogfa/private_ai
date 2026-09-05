@@ -11,7 +11,7 @@ import threading
 from app.database import get_connection
 from app.services.agents import utc_iso
 
-CORE_VERSION = "3.12.0"
+CORE_VERSION = "3.14.0"
 _STORAGE_READY = False
 _STORAGE_LOCK = threading.Lock()
 

@@ -12,7 +12,9 @@ acceptance is evaluated only after real sandbox evidence exists.
 
 import hashlib
 import json
+import os
 import re
+import time
 
 from app.services import agent_runner as legacy_runner
 from app.services.agent_environment import AgentEnvironmentError, ENV_PROFILE_PROJECT, get_agent_run_environment
@@ -31,7 +33,7 @@ from app.services.agent_sandbox import (
     run_npm_script_sandbox,
     write_workspace_file,
 )
-from app.services.agent_v3_model_gateway import V3ModelError, run_json
+from app.services.agent_v3_model_gateway import V3ModelError, V3ModelTimeout, run_json
 from app.services.agent_v3_action_protocol import (
     BUILD_ACTION_SCHEMA,
     DEFECT_ACTION_SCHEMA,
@@ -66,6 +68,21 @@ _ALLOWED_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".json", ".md
 _TEST_NAME_RE = re.compile(r"\b(?:test|it)\s*\(\s*['\"]([^'\"]+)['\"]", re.MULTILINE)
 
 
+# v3.14 repair latency governance. These budgets apply to one logical repair
+# step, not to each internal retry. This prevents a small local repair from
+# monopolizing the Agent for tens of minutes while still leaving slower local
+# reasoning models meaningful time on modest hardware.
+V3_REPAIR_PHASE_TIMEOUT_SECONDS = max(
+    240, int(os.environ.get("PRIVATE_AI_V3_REPAIR_PHASE_TIMEOUT_SECONDS", "420"))
+)
+V3_REPAIR_WORKER_TIMEOUT_SECONDS = max(
+    120, int(os.environ.get("PRIVATE_AI_V3_REPAIR_WORKER_TIMEOUT_SECONDS", "180"))
+)
+V3_REPAIR_REASONING_TIMEOUT_SECONDS = max(
+    180, int(os.environ.get("PRIVATE_AI_V3_REPAIR_REASONING_TIMEOUT_SECONDS", "300"))
+)
+
+
 class V3NodeError(Exception):
     pass
 
@@ -97,6 +114,55 @@ def _workspace_sources(run, *, budget=22000, per_file=7000):
             continue
         remaining = budget - used
         block = f"--- {name} ---\n" + str(content or "")[:remaining]
+        blocks.append(block)
+        used += len(block)
+    return "\n\n".join(blocks)
+
+
+def _repair_workspace_sources(run, authority, *, budget=12000, per_file=5000):
+    """Return a repair-focused source view rather than the whole workspace.
+
+    Writable/preferred files come first. Test files and package.json remain
+    visible as read-only specification context when present, but unrelated
+    sources are omitted once the budget is consumed. Smaller prompts reduce
+    local-model latency and make the mutation boundary easier to follow.
+    """
+    names = _workspace_names(run)
+    lookup = {str(name).lower(): str(name) for name in names}
+    ordered = []
+
+    def add(name):
+        actual = lookup.get(str(name or "").lower())
+        if actual and actual not in ordered:
+            ordered.append(actual)
+
+    for name in (authority or {}).get("preferred_files") or []:
+        add(name)
+    for name in (authority or {}).get("allowed_files") or []:
+        add(name)
+    for name in names:
+        if _is_test_filename(name):
+            add(name)
+    add("package.json")
+    add("index.js")
+    for name in names:
+        add(name)
+
+    used = 0
+    blocks = []
+    allowed = {str(v).lower() for v in (authority or {}).get("allowed_files") or []}
+    for name in ordered:
+        if used >= budget:
+            break
+        if not name.lower().endswith(_ALLOWED_SUFFIXES):
+            continue
+        try:
+            content = read_workspace_file(run["user_id"], run["id"], name, max_chars=per_file)
+        except Exception:
+            continue
+        remaining = budget - used
+        role = "WRITABLE" if name.lower() in allowed else "READ-ONLY CONTEXT"
+        block = f"--- {name} [{role}] ---\n" + str(content or "")[:remaining]
         blocks.append(block)
         used += len(block)
     return "\n\n".join(blocks)
@@ -791,9 +857,13 @@ def _test_repair_authority(run, spec, execution=None, acceptance_issues=None):
         for filename in (test_targets or ["test.js"]):
             permissions.append({"filename": filename, "scope": "coverage_addition", "kinds": ["insufficient_tests"], "implicated_lines": []})
     for issue in acceptance_issues or []:
-        if str(issue.get("type") or "") in {"behavior_unmet", "insufficient_tests"}:
+        # A semantic behavior blocker is implementation-owned unless ATLAS has
+        # independent evidence that test coverage itself is missing.  Granting
+        # generic test-write authority for ``behavior_unmet`` lets a model
+        # rewrite the verifier instead of repairing the product.
+        if str(issue.get("type") or "") == "insufficient_tests":
             for filename in (test_targets or ["test.js"]):
-                permissions.append({"filename": filename, "scope": "coverage_addition", "kinds": [str(issue.get("type"))], "implicated_lines": []})
+                permissions.append({"filename": filename, "scope": "coverage_addition", "kinds": ["insufficient_tests"], "implicated_lines": []})
 
     # Deduplicate while preserving diagnostic order.
     result = []
@@ -809,6 +879,173 @@ def _test_repair_authority(run, spec, execution=None, acceptance_issues=None):
 
 def _repair_allowed_test_files(run, spec, execution=None, acceptance_issues=None):
     return bool(_test_repair_authority(run, spec, execution, acceptance_issues))
+
+
+def _implementation_source_files(run):
+    """Return mutable Node implementation candidates in stable workspace order.
+
+    Test files are specifications and package.json is manifest/control metadata,
+    so neither belongs in the default runtime implementation lane.  Keeping this
+    classification explicit prevents a model from treating the failing stack
+    location (often test.js) as automatic write authority.
+    """
+    result = []
+    for name in _workspace_names(run):
+        lower = str(name or "").lower()
+        if _is_test_filename(name):
+            continue
+        if lower.endswith((".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx")):
+            result.append(name)
+    return result
+
+
+def _test_import_targets(run, execution=None):
+    """Best-effort implementation targets imported by implicated tests.
+
+    Runtime failures frequently point only at a test assertion.  The control
+    plane still needs a useful implementation target without granting the model
+    permission to rewrite the test.  Resolve simple relative require/import
+    edges from implicated test files and use them only as *preferences* inside
+    the already-authorized implementation set.
+    """
+    normalized = normalize_node_execution(execution)
+    implicated = [
+        str(item.get("filename") or "")
+        for item in (normalized or {}).get("locations") or []
+        if _is_test_filename(item.get("filename"))
+    ]
+    if not implicated:
+        implicated = [name for name in _workspace_names(run) if _is_test_filename(name)]
+
+    existing = {str(name).lower(): str(name) for name in _workspace_names(run)}
+    result = []
+    patterns = (
+        re.compile(r"require\s*\(\s*['\"](\./[^'\"]+)['\"]\s*\)"),
+        re.compile(r"from\s+['\"](\./[^'\"]+)['\"]"),
+        re.compile(r"import\s*\(\s*['\"](\./[^'\"]+)['\"]\s*\)"),
+    )
+    for test_name in implicated:
+        actual = existing.get(str(test_name).lower())
+        if not actual:
+            continue
+        try:
+            source = read_workspace_file(run["user_id"], run["id"], actual, max_chars=70000)
+        except Exception:
+            continue
+        for pattern in patterns:
+            for match in pattern.finditer(source):
+                raw = str(match.group(1) or "").replace("\\", "/")
+                base = raw.rsplit("/", 1)[-1]
+                candidates = [base]
+                if not re.search(r"\.(?:js|mjs|cjs|jsx|ts|tsx)$", base, re.I):
+                    candidates.extend(base + suffix for suffix in (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"))
+                for candidate in candidates:
+                    resolved = existing.get(candidate.lower())
+                    if resolved and not _is_test_filename(resolved) and resolved not in result:
+                        result.append(resolved)
+                        break
+    return result
+
+
+def _repair_mutation_authority(run, spec, execution=None, acceptance_issues=None):
+    """Build the file-mutation capability for exactly one repair cycle.
+
+    The model is a proposer, not the authority source.  ATLAS derives mutable
+    files from normalized runtime evidence plus the persistent user contract.
+    This prevents repeated model attempts against protected test files and gives
+    future worker/multi-agent execution a concrete capability boundary.
+    """
+    existing = _workspace_names(run)
+    test_authority = _test_repair_authority(
+        run, spec, execution=execution, acceptance_issues=acceptance_issues
+    )
+    directive = _acceptance_repair_directive(run, spec, acceptance_issues)
+    directive_kind = str(directive.get("kind") or "runtime_repair")
+    directive_allowed = [str(name) for name in directive.get("allowed_files") or [] if str(name)]
+
+    mechanics_files = [
+        str(item.get("filename"))
+        for item in test_authority
+        if str(item.get("scope") or "") == "mechanics_only" and str(item.get("filename") or "")
+    ]
+
+    if directive_allowed:
+        kind = directive_kind
+        allowed = list(dict.fromkeys(directive_allowed))
+    elif mechanics_files:
+        # When evidence proves a verifier mechanics defect, fix that verifier
+        # defect before asking the implementation model to speculate.
+        kind = "test_mechanics"
+        allowed = list(dict.fromkeys(mechanics_files))
+    else:
+        kind = (
+            "acceptance_implementation"
+            if acceptance_issues
+            else "runtime_implementation"
+        )
+        allowed = _implementation_source_files(run)
+        # A proven module-format failure may legitimately require package.json
+        # metadata, but ordinary application failures do not grant manifest
+        # mutation authority.
+        normalized = normalize_node_execution(execution)
+        if has_fact(normalized, "module_format_conflict") and "package.json" in existing:
+            allowed.append("package.json")
+
+    existing_lookup = {str(name).lower(): str(name) for name in existing}
+    normalized_allowed = []
+    for name in allowed:
+        actual = existing_lookup.get(str(name).lower(), str(name))
+        if actual not in normalized_allowed:
+            normalized_allowed.append(actual)
+    allowed = normalized_allowed
+
+    preferred = []
+    normalized = normalize_node_execution(execution)
+    for item in (normalized or {}).get("locations") or []:
+        filename = existing_lookup.get(str(item.get("filename") or "").lower())
+        if filename and filename in allowed and not _is_test_filename(filename) and filename not in preferred:
+            preferred.append(filename)
+    for filename in _test_import_targets(run, execution):
+        if filename in allowed and filename not in preferred:
+            preferred.append(filename)
+    for filename in allowed:
+        if filename not in preferred:
+            preferred.append(filename)
+
+    read_only = [name for name in existing if name not in allowed]
+    return {
+        "kind": kind,
+        "allowed_files": allowed,
+        "preferred_files": preferred,
+        "read_only_files": read_only,
+        "test_permissions": test_authority,
+        "contract_directive": directive,
+        "reason": (
+            "ATLAS derived mutation capability from normalized execution evidence and original-goal contract ownership."
+        ),
+    }
+
+
+def _validate_repair_mutation_authority(files, authority):
+    authority = dict(authority or {})
+    allowed = {str(name).lower() for name in authority.get("allowed_files") or [] if str(name)}
+    if not allowed:
+        raise V3NodeError(
+            "ATLAS could not derive any safe mutable file for the current repair evidence; workspace mutation was refused."
+        )
+    unauthorized = [
+        str(item.get("filename") or "")
+        for item in files or []
+        if str(item.get("filename") or "").lower() not in allowed
+    ]
+    if unauthorized:
+        raise V3NodeError(
+            "Repair mutation authority does not authorize file(s): "
+            + ", ".join(unauthorized)
+            + ". Allowed mutable files for this cycle: "
+            + ", ".join(authority.get("allowed_files") or [])
+        )
+    return True
 
 
 def _acceptance_repair_directive(run, spec, acceptance_issues=None):
@@ -853,6 +1090,17 @@ def _acceptance_repair_directive(run, spec, acceptance_issues=None):
             "allowed_files": ["package.json"],
             "issues": issues,
             "instruction": "Repair only package.json contract metadata required by the listed acceptance blockers.",
+        }
+
+    if types and types <= {"behavior_unmet"}:
+        return {
+            "kind": "behavior_implementation_convergence",
+            "allowed_files": _implementation_source_files(run),
+            "issues": issues,
+            "instruction": (
+                "The original-goal behavior is unmet while executable verification is available. Repair implementation files only; "
+                "do not rewrite tests merely to make semantic acceptance agree."
+            ),
         }
 
     return {
@@ -1138,7 +1386,10 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         acceptance_issues=acceptance_issues,
     )
     repair_directive = _acceptance_repair_directive(run, spec, acceptance_issues)
-    allow_tests = bool(test_authority)
+    mutation_authority = _repair_mutation_authority(
+        run, spec, execution=execution, acceptance_issues=acceptance_issues
+    )
+    allow_tests = any(_is_test_filename(name) for name in mutation_authority.get("allowed_files") or [])
     deterministic_rejection = None
     try:
         deterministic = _deterministic_mechanical_repair(
@@ -1154,6 +1405,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         deterministic = None
         deterministic_rejection = str(error)
     if deterministic:
+        deterministic["repair_authority"] = mutation_authority
         return deterministic
     evidence = format_execution_observation(execution) if execution else "No sandbox execution yet."
     acceptance_text = json.dumps(acceptance_issues or [], ensure_ascii=False, indent=2)
@@ -1179,6 +1431,7 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         + "Do not repeat an already-attempted hypothesis against materially unchanged evidence; use the repair history to choose a new explanation when needed. "
         + "Do not change package.json unless sandbox evidence or an acceptance issue actually requires a manifest/script/dependency change. "
         + "When ATLAS supplies a CONTRACT-DIRECTED REPAIR SCOPE, that scope is authoritative: address that contract gap only and do not edit unrelated files simply because the current sandbox command is green. "
+        + "FILE MUTATION AUTHORITY is a hard capability boundary. You MUST return changes only for allowed_files. Read-only files are context/specification and must never appear in changes. Prefer preferred_files when the evidence is ambiguous. "
         + "Return ONLY JSON: {diagnosis,hypothesis,changes:[{filename,content,reason}]}. Each content is the COMPLETE file. "
         + "For a .json file, content may be either the complete JSON string or a JSON object/array; ATLAS canonicalizes it."
     )
@@ -1188,26 +1441,73 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
         + "\n\nLATEST AUTHORITATIVE SANDBOX EVIDENCE:\n" + evidence[-7000:]
         + "\n\nDETERMINISTIC TEST-HARNESS DIAGNOSTICS:\n" + harness_text
         + "\n\nTEST REPAIR AUTHORITY:\n" + json.dumps(test_authority, ensure_ascii=False, indent=2)[:5000]
+        + "\n\nFILE MUTATION AUTHORITY (HARD BOUNDARY):\n" + json.dumps(mutation_authority, ensure_ascii=False, indent=2)[:7000]
         + "\n\nDETERMINISTIC CANDIDATE REJECTION (if any):\n" + str(deterministic_rejection or "none")[:3000]
         + "\n\nRECENT REPAIR HISTORY / OUTCOMES:\n" + history_text
         + "\n\nFINAL ACCEPTANCE ISSUES (if verification already passed):\n" + acceptance_text[:4000]
         + "\n\nCONTRACT-DIRECTED REPAIR SCOPE:\n" + json.dumps(repair_directive, ensure_ascii=False, indent=2)[:5000]
-        + "\n\nCURRENT WORKSPACE:\n" + _workspace_sources(run, budget=19000, per_file=6500)
+        + "\n\nCURRENT WORKSPACE (repair-focused; writable roles are authoritative):\n"
+        + _repair_workspace_sources(run, mutation_authority, budget=12000, per_file=5000)
     )
 
-    tier = "worker" if int(cycle) <= 1 else "reasoning"
+    # v3.14: every repair starts with the faster worker under a narrow file
+    # capability. Escalate to the reasoning model only after a concrete
+    # rejection. One logical repair step also has a total wall-clock budget so
+    # internal retries cannot multiply long model timeouts into a 20-50 minute
+    # UI stall.
+    phase_started = time.monotonic()
     last_error = None
-    # Candidate-format/validation failures are internal retries. They do not
-    # consume a committed engineering repair slot in the v3 governor.
-    for attempt in range(3):
+    timeout_events = []
+    attempt_plan = [
+        # Fast bounded executor first.  The repair prompt is already constrained
+        # by file authority and real sandbox evidence, so most ordinary fixes
+        # should not pay a reasoning-model tax.
+        ("worker", V3_REPAIR_WORKER_TIMEOUT_SECONDS, "worker_direct", False),
+        # Escalate once with explicit thinking only after a concrete rejection.
+        ("reasoning", V3_REPAIR_REASONING_TIMEOUT_SECONDS, "reasoning_escalation", True),
+        # If the reasoning proposal violates capability/schema constraints, let
+        # the fast worker serialize/recover under the exact rejection evidence.
+        ("worker", V3_REPAIR_WORKER_TIMEOUT_SECONDS, "worker_authority_recovery", False),
+    ]
+
+    for attempt, (attempt_tier, call_budget, lane_name, think_mode) in enumerate(attempt_plan, start=1):
+        elapsed = time.monotonic() - phase_started
+        remaining = int(V3_REPAIR_PHASE_TIMEOUT_SECONDS - elapsed)
+        if remaining < 30:
+            last_error = (
+                f"Repair phase reached its {V3_REPAIR_PHASE_TIMEOUT_SECONDS}s total latency budget "
+                "before another safe model attempt could start."
+            )
+            break
+
+        per_call_timeout = max(30, min(int(call_budget), remaining))
+        authority_recovery = ""
+        if attempt >= 2:
+            authority_recovery = (
+                "\n\nAUTHORITY-RECOVERY MODE:\n"
+                "Previous candidate(s) violated or failed the bounded repair contract. "
+                "Do not reconsider the write boundary. Return a coherent change-set using ONLY these mutable files: "
+                + ", ".join(mutation_authority.get("allowed_files") or [])
+                + ". Prefer: " + ", ".join(mutation_authority.get("preferred_files") or [])
+                + ". Never include read-only files: " + ", ".join(mutation_authority.get("read_only_files") or [])
+            )
         try:
             data, model = run_json(
                 run,
                 phase="repair",
-                purpose=f"v3_node_repair_cycle_{cycle}_attempt_{attempt + 1}",
+                purpose=f"v3_node_repair_cycle_{cycle}_{lane_name}",
                 system_prompt=system,
-                user_prompt=user + (f"\n\nPREVIOUS CANDIDATE REJECTION:\n{last_error}" if last_error else ""),
-                tier=("reasoning" if attempt >= 1 and tier == "worker" else tier),
+                user_prompt=(
+                    user
+                    + authority_recovery
+                    + (f"\n\nPREVIOUS CANDIDATE REJECTION:\n{last_error}" if last_error else "")
+                ),
+                tier=attempt_tier,
+                total_timeout_seconds=per_call_timeout,
+                # Thinking is an explicit per-lane resource.  Worker repair and
+                # serialization lanes disable it; only the bounded reasoning
+                # escalation may spend a thinking budget.
+                think_mode=think_mode,
                 schema=REPAIR_ACTION_SCHEMA,
                 schema_name="node_repair_action_v1",
             )
@@ -1215,8 +1515,9 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
                 {"changes": data.get("changes") or data.get("files") or []},
                 spec,
                 require_all_explicit=False,
-                allow_test_changes=allow_tests,
+                allow_test_changes=True,
             )
+            _validate_repair_mutation_authority(files, mutation_authority)
             existing_names = _workspace_names(run)
             existing_lower = {name.lower() for name in existing_names}
             required_lower = {str(name).lower() for name in spec.get("required_files") or []}
@@ -1243,20 +1544,47 @@ def repair_project(run, spec, execution, cycle, acceptance_issues=None, repair_h
 
             return {
                 "model": model,
-                "lane": "model_reasoning",
+                "lane": "model_reasoning" if attempt_tier == "reasoning" else "model_worker",
+                "model_attempt_lane": lane_name,
                 "diagnosis": str(data.get("diagnosis") or "")[:3000],
                 "hypothesis": str(data.get("hypothesis") or data.get("diagnosis") or "")[:2000],
                 "harness_diagnostics": harness_diagnostics,
                 "test_repair_authority": test_authority,
                 "deterministic_rejection": deterministic_rejection,
                 "repair_directive": repair_directive,
+                "repair_authority": mutation_authority,
                 "contract_progress": contract_progress,
                 "preflight": preflight,
                 "changed": _apply_files(run, files),
             }
+        except V3ModelTimeout as error:
+            timeout_events.append({
+                "tier": attempt_tier,
+                "lane": lane_name,
+                "timeout_seconds": per_call_timeout,
+                "error": str(error),
+            })
+            last_error = (
+                f"{lane_name} ({attempt_tier}) timed out after {per_call_timeout}s; "
+                "ATLAS will use the next bounded repair lane if phase budget remains."
+            )
+            continue
         except (V3ModelError, V3NodeError, V3CandidateError) as error:
             last_error = str(error)
-    raise V3NodeError("Repair could not produce a validated change-set: " + str(last_error or "unknown error"))
+            continue
+
+    elapsed = int(time.monotonic() - phase_started)
+    timeout_detail = ""
+    if timeout_events:
+        timeout_detail = " Timed-out lanes: " + "; ".join(
+            f"{item['lane']}={item['timeout_seconds']}s" for item in timeout_events
+        ) + "."
+    raise V3NodeError(
+        "Repair could not produce a validated change-set within the bounded "
+        f"repair latency policy ({elapsed}s elapsed, {V3_REPAIR_PHASE_TIMEOUT_SECONDS}s phase ceiling). "
+        + str(last_error or "No safe candidate was produced.")
+        + timeout_detail
+    )
 
 
 def inject_intentional_defect(run, spec, baseline_execution=None):
